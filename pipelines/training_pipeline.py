@@ -7,7 +7,7 @@ from datetime import datetime
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
-from sklearn.metrics import root_mean_squared_error, r2_score 
+from sklearn.metrics import root_mean_squared_error
 
 # --- CONFIGURATION ---
 KARACHI_LAT = 24.8607
@@ -22,7 +22,6 @@ def get_aqi_status(aqi):
     else: return "🟣 Very Unhealthy"
 
 def get_forecast_features():
-    print("🌐 Fetching 3-day weather forecast for Karachi...")
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m",
@@ -44,90 +43,64 @@ def get_forecast_features():
     return prep, df_forecast['time']
 
 def run_pipeline():
-    project = hopsworks.login()
+    # Load API Key securely
+    api_key = os.getenv('HOURLY_HOPSWORKS_API_KEY') 
+    project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    print("📥 Pulling data from Feature View Version 2...")
+    # 1. FETCH DATA (Using version 2 as you defined)
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
     X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
 
-    # 3. MODEL COMPETITION
+    # 2. MODEL SELECTION
     models = {
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5),
         "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10),
         "Ridge": Ridge(alpha=1.0)
     }
 
-    best_model, best_rmse, best_name = None, float('inf'), ""
-    print("🚀 Starting Model Training...")
+    best_model, best_rmse = None, float('inf')
     for name, model in models.items():
         model.fit(X_train, y_train.values.ravel())
         preds = model.predict(X_test)
         rmse = root_mean_squared_error(y_test, preds)
         if rmse < best_rmse:
-            best_rmse, best_model, best_name = rmse, model, name
+            best_rmse, best_model = rmse, model
 
-    print(f"\n🏆 Winner: {best_name} (RMSE: {best_rmse:.4f})")
-    
-    # 4. SAVE BEST MODEL (Local and Remote)
-    model_dir = "aqi_model"
-    os.makedirs(model_dir, exist_ok=True)
-    joblib.dump(best_model, f"{model_dir}/model.pkl")
-
-    try:
-        mr = project.get_model_registry()
-        aqi_model = mr.python.create_model(
-            name="karachi_aqi_model", 
-            metrics={"rmse": best_rmse},
-            description=f"Retrained winner: {best_name}"
-        )
-        aqi_model.save(model_dir)
-        print("✅ Model Registry updated successfully.")
-    except Exception as e:
-        print(f"⚠️ Warning: Registry upload failed, but local model is ready.")
-
-    # 5. GENERATE 3-DAY PREDICTIONS
+    # 3. GENERATE 3-DAY FORECAST
     X_forecast, timestamps = get_forecast_features()
+    last_known = X_train.iloc[-1]
     
-    # We use y_train to get the last known aqi value, and X_train for the features
-    last_known_features = X_train.iloc[-1]
-    
-    X_forecast['pm25'] = last_known_features['pm25']
-    X_forecast['pm10'] = last_known_features['pm10']
-    X_forecast['co'] = last_known_features['co']
-    X_forecast['aqi_lag_1'] = last_known_features['aqi_lag_1']
-    X_forecast['aqi_lag_2'] = last_known_features['aqi_lag_2']
-    X_forecast['pm25_lag_1'] = last_known_features['pm25_lag_1']
-    X_forecast['aqi_change_rate'] = 0.0 
+    # Use last known pollutants to fill forecast features
+    for col in ['pm25', 'pm10', 'co', 'aqi_lag_1', 'aqi_lag_2', 'pm25_lag_1']:
+        X_forecast[col] = last_known[col]
+    X_forecast['aqi_change_rate'] = 0.0
 
-    # 6. EXACT SCHEMA ORDER (REMOVED 'aqi' BECAUSE IT IS THE TARGET)
-    # The model expects exactly these 14 columns in this order:
+    # Ensure schema order
     hopsworks_features = [
         'weekday', 'month', 'dew_point', 'aqi_lag_1', 'year', 'aqi_lag_2', 
         'hour', 'co', 'aqi_change_rate', 'pm10', 'pm25_lag_1', 
         'day', 'pm25', 'wind_speed'
     ]
-    X_forecast = X_forecast[hopsworks_features]
+    preds = best_model.predict(X_forecast[hopsworks_features])
 
-    print("🔮 Generating future predictions...")
-    preds = best_model.predict(X_forecast)
-    
-    # 7. FORMAT AND SAVE
-    final_df = pd.DataFrame({
-        "Timestamp": timestamps,
-        "Predicted_AQI": preds.round(2)
-    })
-    final_df['Health_Status'] = final_df['Predicted_AQI'].apply(get_aqi_status)
+    # 4. PREPARE DATAFRAME
+    forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
+    forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
+    forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("\n📅 --- KARACHI 3-DAY SUMMARY ---")
-    summary = final_df.groupby(final_df['Timestamp'].dt.date).agg({
-        'Predicted_AQI': 'mean',
-        'Health_Status': lambda x: x.mode()[0]
-    })
-    print(summary)
-
-    final_df.to_csv("karachi_3day_forecast.csv", index=False)
-    print("\n✅ Forecast saved to 'karachi_3day_forecast.csv'.")
+    # 5. INSERT INTO EXISTING FEATURE GROUP (NO CREATE)
+    try:
+        print("🚀 Accessing existing forecast feature group...")
+        forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+        
+        # We add wait_for_job=False to prevent the connection timeout error
+        print("📥 Inserting predictions...")
+        forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
+        print("✅ Data sent to Hopsworks! (Background job is processing)")
+        
+    except Exception as e:
+        print(f"❌ Error during Hopsworks insertion: {e}")
 
 if __name__ == "__main__":
     run_pipeline()

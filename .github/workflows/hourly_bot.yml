@@ -15,5 +15,5 @@ jobs:
         run: pip install hopsworks pandas requests xgboost scikit-learn joblib pyarrow
       - name: Run Python Script
         env:
-          HOURLY_HOPSWORKS_API_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
+          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
         run: python pipelines/fetch_live_data_hourly.py

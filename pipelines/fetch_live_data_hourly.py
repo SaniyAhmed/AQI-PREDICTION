@@ -64,7 +64,8 @@ def get_live_data():
     return live_df[target_cols].tail(1)
 
 def run_pipeline():
-    project = hopsworks.login()
+    api_key = os.getenv('HOURLY_HOPSWORKS_API_KEY') 
+    project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     aqi_fg = fs.get_feature_group(name="karachi_aqi", version=1)
     

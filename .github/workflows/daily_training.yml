@@ -19,7 +19,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install hopsworks pandas xgboost scikit-learn joblib requests hsml
+          pip install hopsworks pandas xgboost scikit-learn joblib requests hsml pyarrow
 
       - name: Run Training Pipeline
         env:

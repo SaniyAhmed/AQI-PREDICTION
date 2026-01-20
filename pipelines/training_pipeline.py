@@ -1,14 +1,22 @@
-import hopsworks
-import pandas as pd
-import requests
-import joblib
 import os
+import requests
+import pandas as pd
+import hopsworks
+import joblib
 import shutil
+import time
 from datetime import datetime
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import root_mean_squared_error
+
+# ==========================================
+# --- 1. GLOBAL KILL-SWITCH FOR ERRORS ---
+# ==========================================
+# This forces Hopsworks to use standard web protocols (REST/Hive) 
+# instead of the Arrow Flight service which fails in GitHub Actions.
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 # --- CONFIGURATION ---
 KARACHI_LAT = 24.8607
@@ -17,12 +25,11 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AQICN_TOKEN = "c6a73cfca3b6bb6d9930dabdd8c0eea057e29278"
 AQICN_URL = f"https://api.waqi.info/feed/geo:{KARACHI_LAT};{KARACHI_LON}/?token={AQICN_TOKEN}"
 
-# 🔥 BYPASS ARROW FLIGHT: Force Hopsworks to use standard REST for data transfers
-os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
-
 def get_forecast_features():
+    """Fetches weather and pollutant forecasts to create features for the model."""
     print("🌐 Fetching Weather (Open-Meteo) + Pollutant Forecasts (AQICN)...")
     
+    # 1. Weather Forecast
     w_params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m",
@@ -32,6 +39,7 @@ def get_forecast_features():
     df_forecast = pd.DataFrame(w_res["hourly"])
     df_forecast['time'] = pd.to_datetime(df_forecast['time'])
 
+    # 2. Pollutant Forecast
     aq_res = requests.get(AQICN_URL).json()
     pm25_daily_forecast = aq_res['data']['forecast']['daily']['pm25']
     
@@ -57,29 +65,31 @@ def get_forecast_features():
 def run_pipeline():
     # 1. LOGIN
     api_key = os.getenv('MY_HOPSWORK_KEY') 
+    if not api_key:
+        raise ValueError("MY_HOPSWORK_KEY environment variable is not set!")
+    
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    # 2. FETCH TRAINING DATA
-    # 2. FETCH TRAINING DATA
-    print("📥 Pulling training data from Feature View (Forcing Hive fallback)...")
+    # 2. FETCH TRAINING DATA (BRICK SOLUTION)
+    print("📥 Pulling training data (FORCING HIVE FALLBACK TO AVOID ARROW FLIGHT)...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
-
-    # 🔥 FIX: Specifically tell the engine to use Hive instead of Arrow Flight
-    # This bypasses the port/connection errors entirely.
+    
+    # read_options={"use_hive": True} is the definitive fix for Arrow Flight errors
     X_train, X_test, y_train, y_test = feature_view.train_test_split(
         test_size=0.2,
-        read_options={"use_hive": True} 
+        read_options={"use_hive": True}
     )
 
-    # DATA CLEANING
+    # 3. DATA CLEANING
     print("🧹 Cleaning data (removing NaNs)...")
     X_train = X_train.dropna()
     y_train = y_train.loc[X_train.index]
     X_test = X_test.dropna()
     y_test = y_test.loc[X_test.index]
 
-    # 3. MODEL TOURNAMENT
+    # 4. MODEL TOURNAMENT
+    print("🏆 Starting Model Tournament...")
     models = {
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5),
         "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10),
@@ -91,56 +101,55 @@ def run_pipeline():
         model.fit(X_train, y_train.values.ravel())
         preds = model.predict(X_test)
         rmse = root_mean_squared_error(y_test, preds)
-        print(f"Model: {name} | RMSE: {rmse:.4f}")
+        print(f"   - Model: {name} | RMSE: {rmse:.4f}")
         if rmse < best_rmse:
             best_rmse, best_model, best_model_name = rmse, model, name
 
-    print(f"🏆 Best Model: {best_model_name} with RMSE: {best_rmse:.4f}")
+    print(f"✨ Winner: {best_model_name} (RMSE: {best_rmse:.4f})")
 
-    # 4. SAVE BEST MODEL TO REGISTRY
-    print("📦 Uploading model to Hopsworks Model Registry...")
+    # 5. SAVE BEST MODEL TO REGISTRY
+    print("📦 Uploading best model to Hopsworks Model Registry...")
     mr = project.get_model_registry()
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir):
         shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     
-    # Save model file locally
     joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
 
-    # Create model entry
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description=f"Best model ({best_model_name}) from daily training tournament."
+        description=f"Best model ({best_model_name}) from daily tournament."
     )
     karachi_model.save(model_dir)
 
-    # 5. GENERATE 3-DAY FORECAST
+    # 6. GENERATE 3-DAY FORECAST
     X_forecast, timestamps = get_forecast_features()
-    last_known = X_train.iloc[-1]
     
+    # Fill static/lag features from the most recent known training row
+    last_known = X_train.iloc[-1]
     cols_to_persist = ['pm10', 'co', 'aqi_lag_1', 'aqi_lag_2', 'pm25_lag_1']
     for col in cols_to_persist:
         X_forecast[col] = last_known[col]
     
     X_forecast['aqi_change_rate'] = 0.0
-    X_forecast = X_forecast[X_train.columns]
+    X_forecast = X_forecast[X_train.columns] # Reorder to match model input
 
     print("🔮 Generating future predictions...")
     preds = best_model.predict(X_forecast)
 
-    # 6. PREPARE DATAFRAME FOR UPLOAD
+    # 7. PREPARE DATAFRAME FOR UPLOAD
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. INSERT INTO HOPSWORKS
+    # 8. INSERT INTO HOPSWORKS
     try:
-        print("🚀 Accessing forecast feature group...")
+        print("🚀 Inserting predictions into 'karachi_aqi_forecast'...")
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS! 72 predictions and model stored.")
+        print(f"✅ SUCCESS! Pipeline completed. Model and {len(forecast_df)} predictions updated.")
         
     except Exception as e:
         print(f"❌ Error during Hopsworks insertion: {e}")

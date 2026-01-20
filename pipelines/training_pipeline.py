@@ -51,20 +51,20 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    # 2. FETCH DATA (THE HIVE FIX)
-    print("📥 Pulling training data via Hive connection (GitHub safe mode)...")
+    # 2. FETCH DATA (THE CRITICAL FIX)
+    print("📥 Pulling training data via Hive connection...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
     
-    # use_hive=True avoids the Arrow Flight Client network error in GitHub Actions
+    # FORCING HIVE MODE: This is what stops the 'Could not read data using Hopsworks Query Service' error
     X_train, X_test, y_train, y_test = feature_view.train_test_split(
         test_size=0.2, 
-        read_options={"use_hive": True}
+        read_options={"use_hive": True} 
     )
 
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 
-    # 3. TOURNAMENT
+    # 3. MODEL TOURNAMENT
     models = {"XGBoost": XGBRegressor(n_estimators=100), "RandomForest": RandomForestRegressor(n_estimators=100), "Ridge": Ridge(alpha=1.0)}
     best_model, best_rmse, best_name = None, float('inf'), ""
     for name, model in models.items():

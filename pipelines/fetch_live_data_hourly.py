@@ -2,6 +2,7 @@ import os
 import requests
 import pandas as pd
 import hopsworks
+import time
 from datetime import datetime
 
 # --- CONFIG ---
@@ -65,15 +66,35 @@ def get_live_data():
 
 def run_pipeline():
     api_key = os.getenv('MY_HOPSWORK_KEY') 
-    project = hopsworks.login(api_key_value=api_key)
-    fs = project.get_feature_store()
-    aqi_fg = fs.get_feature_group(name="karachi_aqi", version=1)
     
-    new_row = get_live_data()
-    print("🚀 Columns verified. Preparing to insert...")
-    
-    aqi_fg.insert(new_row)
-    print(f"✅ SUCCESS! Karachi AQI for hour {new_row['hour'].values[0]} is now in Hopsworks.")
+    # --- RETRY LOGIC (3 ATTEMPTS) ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Execution attempt {attempt + 1} of {max_retries}...")
+            
+            project = hopsworks.login(api_key_value=api_key)
+            fs = project.get_feature_store()
+            aqi_fg = fs.get_feature_group(name="karachi_aqi", version=1)
+            
+            new_row = get_live_data()
+            print("🚀 Columns verified. Preparing to insert...")
+            
+            # Using wait_for_job=False to prevent GitHub Action timeouts
+            aqi_fg.insert(new_row, write_options={"wait_for_job": False})
+            
+            print(f"✅ SUCCESS! Karachi AQI for hour {new_row['hour'].values[0]} is now in Hopsworks.")
+            return # Exit function on success
+            
+        except Exception as e:
+            print(f"⚠️ Error occurred: {e}")
+            if attempt < max_retries - 1:
+                wait_time = 15 # Wait 15 seconds before trying again
+                print(f"⏳ Waiting {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+            else:
+                print("❌ All retry attempts failed. Raising error.")
+                raise e
 
 if __name__ == "__main__":
     run_pipeline()

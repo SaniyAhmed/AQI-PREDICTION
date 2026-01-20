@@ -1,26 +1,33 @@
-name: Daily_Training_Pipeline
+name: Daily_Model_Training
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    - cron: '0 0 * * *' # Runs exactly at midnight UTC every day
+  workflow_dispatch:      # Allows you to trigger it manually for testing
 
 jobs:
-  run_training:
+  train_and_predict:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+          cache: 'pip' # Speeds up subsequent runs
 
-      - name: Install Libraries
-        run: pip install "hopsworks[python]" pandas xgboost scikit-learn joblib pyarrow
+      - name: Install Dependencies
+        run: |
+          pip install pandas requests xgboost scikit-learn joblib hopsworks
+          # We explicitly avoid installing pyarrow here if it was causing issues, 
+          # but Hopsworks usually requires it as a dependency. 
 
       - name: Run Training Pipeline
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
-          # THIS IS THE MAGIC LINE TO STOP THE ERROR:
-          HSFS_DISABLE_REST_DATA_INTERFACE: "true"
+          # This flag tells Hopsworks NOT to use the Arrow Flight server for reading data
+          # It forces the use of the standard REST API / Online Store client
+          HSFS_DISABLE_FLIGHT_CLIENT: "True" 
         run: python pipelines/training_pipeline.py

@@ -2,8 +2,8 @@ name: Daily Model Retraining & Forecast
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs every 24 hours at midnight
-  workflow_dispatch:      # Allows you to run it manually for testing
+    - cron: '0 0 * * *'  # Runs every 24 hours
+  workflow_dispatch:      # Manual trigger
 
 jobs:
   retrain:
@@ -23,6 +23,6 @@ jobs:
 
       - name: Run Training Pipeline
         env:
-          # Mapping your GitHub Secret (WITH 'S') to the Python variable (WITHOUT 'S')
+          # This maps your GitHub Secret (MY_HOPSWORKS_KEY) to the script's variable
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
         run: python pipelines/training_pipeline.py

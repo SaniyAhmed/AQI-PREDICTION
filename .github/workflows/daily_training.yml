@@ -1,4 +1,4 @@
-name: Daily Model Retraining & Forecast
+name: Daily_Training_Pipeline
 
 on:
   schedule:
@@ -6,22 +6,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  retrain:
+  run_training:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
+          python-version: '3.10' # Matched to your Bot
 
-      - name: Install Dependencies
-        run: |
-          pip install hopsworks pandas xgboost scikit-learn joblib requests hsml pyarrow
+      - name: Install Libraries
+        run: pip install "hopsworks[python]" pandas requests xgboost scikit-learn joblib pyarrow
 
       - name: Run Training Pipeline
         env:
+          # This maps your GitHub Secret to the variable the script needs
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
         run: python pipelines/training_pipeline.py

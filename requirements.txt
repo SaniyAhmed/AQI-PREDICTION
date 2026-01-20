@@ -1,0 +1,18 @@
+# --- Core Data & API ---
+pandas
+requests
+pytz
+
+# --- Hopsworks & Data Engineering ---
+hopsworks
+pyarrow
+confluent-kafka
+
+# --- Machine Learning & Modeling ---
+xgboost
+scikit-learn
+joblib
+
+# --- Utilities ---
+datetime
+# os, time, shutil are built-in and do not need to be listed

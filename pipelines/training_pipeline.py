@@ -10,7 +10,9 @@ from sklearn.linear_model import Ridge
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
 
-# Force REST API
+# ==========================================
+# --- 1. THE ULTIMATE KILL-SWITCHES ---
+# ==========================================
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 # --- CONFIGURATION ---
@@ -53,74 +55,98 @@ def run_pipeline():
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    # 2. FETCH DATA VIA "READ" (Avoids the Query Service/Flight entirely)
-    print("📥 Pulling data via FG.read()...")
-    try:
-        # fg.read() is different from feature_view.get_batch_data()
-        # It downloads the data as a file instead of streaming it via Arrow Flight
-        fg = fs.get_feature_group(name="karachi_aqi", version=1)
-        full_df = fg.read()
-    except:
-        print("⚠️ karachi_aqi failed, trying version 1 explicitly...")
-        fg = fs.get_feature_group(name="karachi_aqi_1", version=1)
-        full_df = fg.read()
-
-    print(f"📊 Data loaded: {len(full_df)} rows.")
+    # 2. AGGRESSIVE DATA FETCH (The "Brick" Logic)
+    print("📥 Attempting to find and read Feature Group...")
+    full_df = None
+    # Try multiple common naming patterns you might have used
+    possible_names = ["karachi_aqi", "karachi_aqi_1", "karachi_aqi_fg"]
     
+    for name in possible_names:
+        try:
+            print(f"🔍 Checking for Feature Group: '{name}' (version 1)...")
+            fg = fs.get_feature_group(name=name, version=1)
+            full_df = fg.read(read_options={"use_hive": True})
+            if full_df is not None:
+                print(f"✅ Successfully loaded data from '{name}'!")
+                break
+        except Exception as e:
+            print(f"❌ Could not read '{name}': {e}")
+            continue
+
+    if full_df is None:
+        print("🛑 ERROR: Could not find ANY feature group. Please check your Hopsworks Feature Store UI for the exact name.")
+        return
+
     # 3. SPLIT & CLEAN
     target = "aqi"
+    if target not in full_df.columns:
+        print(f"🛑 ERROR: Target column '{target}' not found in data! Columns: {full_df.columns}")
+        return
+
     y = full_df[[target]]
     X = full_df.drop(columns=[target])
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     X_train, X_test = X_train.dropna(), X_test.dropna()
     y_train, y_test = y_train.loc[X_train.index], y_test.loc[X_test.index]
 
-    # 4. TOURNAMENT
-    print("🏆 Training Models...")
+    # 4. MODEL TOURNAMENT
+    print("🏆 Starting Model Tournament...")
     models = {
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5),
         "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10)
     }
-    best_model, best_rmse = None, float('inf')
+
+    best_model, best_rmse, best_model_name = None, float('inf'), ""
     for name, model in models.items():
         model.fit(X_train, y_train.values.ravel())
         preds = model.predict(X_test)
         rmse = root_mean_squared_error(y_test, preds)
         print(f"   - {name} RMSE: {rmse:.4f}")
         if rmse < best_rmse:
-            best_rmse, best_model = rmse, model
+            best_rmse, best_model, best_model_name = rmse, model, name
 
-    # 5. SAVE MODEL
-    print("📦 Saving to Registry...")
+    # 5. SAVE BEST MODEL
+    print(f"📦 Saving {best_model_name} to Registry...")
     mr = project.get_model_registry()
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
-    joblib.dump(best_model, f"{model_dir}/model.pkl")
-    aqi_model = mr.python.create_model(name="karachi_aqi_model", metrics={"rmse": best_rmse})
-    aqi_model.save(model_dir)
+    joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
 
-    # 6. FORECAST
+    karachi_model = mr.python.create_model(
+        name="karachi_aqi_model", 
+        metrics={"rmse": best_rmse},
+        description="Daily automated training via REST fallback."
+    )
+    karachi_model.save(model_dir)
+
+    # 6. GENERATE 3-DAY FORECAST
     X_forecast, timestamps = get_forecast_features()
     last_known = X_train.iloc[-1]
     cols_to_persist = ['pm10', 'co', 'aqi_lag_1', 'aqi_lag_2', 'pm25_lag_1']
-    for col in cols_to_persist: X_forecast[col] = last_known[col]
+    for col in cols_to_persist:
+        if col in last_known: X_forecast[col] = last_known[col]
+        else: X_forecast[col] = 0 # Fallback for missing features
+    
     X_forecast['aqi_change_rate'] = 0.0
     X_forecast = X_forecast[X_train.columns]
+
+    print("🔮 Generating future predictions...")
     preds = best_model.predict(X_forecast)
 
-    # 7. UPLOAD
+    # 7. PREPARE DATAFRAME
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
+    # 8. INSERT INTO HOPSWORKS
     try:
-        print("🚀 Uploading predictions...")
+        print("🚀 Inserting predictions into karachi_aqi_forecast...")
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
         print(f"✅ SUCCESS!")
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Error during insertion: {e}")
 
 if __name__ == "__main__":
     run_pipeline()

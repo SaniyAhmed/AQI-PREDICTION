@@ -1,0 +1,27 @@
+name: Daily Model Retraining & Forecast
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs every 24 hours at midnight
+  workflow_dispatch:      # Allows you to run it manually for testing
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install hopsworks pandas xgboost scikit-learn joblib requests hsml
+
+      - name: Run Training Pipeline
+        env:
+          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
+        run: python pipelines/training_pipeline.py

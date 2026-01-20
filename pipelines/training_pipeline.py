@@ -51,22 +51,35 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    # 2. FETCH DATA (THE CRITICAL FIX)
-    print("📥 Pulling training data via Hive connection...")
-    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
+    # 2. FETCH DATA (THE ROBUST SQL WAY)
+    print("📥 Pulling training data via SQL (Bypassing Arrow)...")
     
-    # FORCING HIVE MODE: This is what stops the 'Could not read data using Hopsworks Query Service' error
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(
-        test_size=0.2, 
-        read_options={"use_hive": True} 
-    )
+    # Get the Feature Group directly instead of the Feature View to avoid Arrow initialization
+    fg = fs.get_feature_group(name="karachi_aqi", version=1)
+    
+    # Read using Hive SQL - this is the most compatible mode for GitHub Runners
+    df = fg.read(read_options={"use_hive": True})
+    
+    # Manually split since we are reading raw data to be safe
+    df = df.sort_values(['year', 'month', 'day', 'hour']).dropna()
+    
+    # Define features and target based on your schema
+    target = 'aqi'
+    # Drop target and metadata for X
+    X = df.drop(columns=[target], errors='ignore')
+    y = df[[target]]
 
-    X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
-    X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
+    # Split 80/20
+    split_idx = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+    y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    # 3. MODEL TOURNAMENT
+    print(f"✅ Data Loaded. Training on {len(X_train)} rows.")
+
+    # 3. TOURNAMENT
     models = {"XGBoost": XGBRegressor(n_estimators=100), "RandomForest": RandomForestRegressor(n_estimators=100), "Ridge": Ridge(alpha=1.0)}
     best_model, best_rmse, best_name = None, float('inf'), ""
+    
     for name, model in models.items():
         model.fit(X_train, y_train.values.ravel())
         rmse = root_mean_squared_error(y_test, model.predict(X_test))
@@ -79,20 +92,23 @@ def run_pipeline():
     if not os.path.exists(model_dir): os.makedirs(model_dir)
     joblib.dump(best_model, f"{model_dir}/model.pkl")
 
-    input_schema, output_schema = ModelSchema(X_train), ModelSchema(y_train)
     karachi_model = mr.python.create_model(
-        name="karachi_aqi_model", metrics={"rmse": best_rmse},
-        description=f"Best model ({best_name}) trained on daily update.",
-        input_schema=input_schema, output_schema=output_schema
+        name="karachi_aqi_model", 
+        metrics={"rmse": best_rmse},
+        description=f"Best model ({best_name}) trained on daily update."
     )
     karachi_model.save(model_dir)
     
     # 5. FORECAST & INSERT
     X_forecast, timestamps = get_forecast_features()
     last_known = X_train.iloc[-1]
-    for col in ['pm10', 'co', 'aqi_lag_1', 'aqi_lag_2', 'pm25_lag_1']: X_forecast[col] = last_known[col]
-    X_forecast['aqi_change_rate'] = 0.0
-    X_forecast = X_forecast[X_train.columns]
+    
+    # Ensure forecast has all necessary columns from X_train
+    for col in X_train.columns:
+        if col not in X_forecast.columns:
+            X_forecast[col] = last_known[col]
+            
+    X_forecast = X_forecast[X_train.columns] # Match order
     
     preds = best_model.predict(X_forecast)
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
@@ -102,7 +118,7 @@ def run_pipeline():
     try:
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS! Predictions and Model Version {karachi_model.version} stored.")
+        print(f"✅ SUCCESS! Forecast and Model Version {karachi_model.version} stored.")
     except Exception as e:
         print(f"❌ Error during insertion: {e}")
 

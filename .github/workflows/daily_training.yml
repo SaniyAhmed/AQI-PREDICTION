@@ -22,8 +22,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          # We install standard hopsworks without [python] extras to avoid pyarrow
-          pip install hopsworks
+          pip install "hopsworks[python]"
           pip install -r requirements.txt
 
       - name: Run Training Pipeline

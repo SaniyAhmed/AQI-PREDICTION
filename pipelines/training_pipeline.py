@@ -18,7 +18,7 @@ AQICN_TOKEN = "c6a73cfca3b6bb6d9930dabdd8c0eea057e29278"
 AQICN_URL = f"https://api.waqi.info/feed/geo:{KARACHI_LAT};{KARACHI_LON}/?token={AQICN_TOKEN}"
 
 def get_forecast_features():
-    print("🌐 Fetching Weather (Open-Meteo) + Pollutant Forecasts (AQICN)...")
+    print("🌐 Fetching Weather + Pollutant Forecasts...")
     w_params = {"latitude": KARACHI_LAT, "longitude": KARACHI_LON, "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m", "forecast_days": 3}
     w_res = requests.get(FORECAST_URL, params=w_params).json()
     df_forecast = pd.DataFrame(w_res["hourly"])
@@ -45,41 +45,35 @@ def get_forecast_features():
     return prep, df_forecast['time']
 
 def run_pipeline():
-    # 1. LOGIN
+    # 1. LOGIN (Exactly like your hourly bot)
     api_key = os.getenv('MY_HOPSWORK_KEY') 
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    # 2. FETCH DATA (THE ROBUST SQL WAY)
-    print("📥 Pulling training data via SQL (Bypassing Arrow)...")
-    
-    # Get the Feature Group directly instead of the Feature View to avoid Arrow initialization
+    # 2. FETCH DATA - USING DIRECT FEATURE GROUP READ
+    # This bypasses the Feature View/Arrow Flight service entirely
+    print("📥 Pulling data directly from Feature Group (Bot Style)...")
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
     
-    # Read using Hive SQL - this is the most compatible mode for GitHub Runners
+    # We use hive=True to ensure it stays on the standard HTTP port
     df = fg.read(read_options={"use_hive": True})
-    
-    # Manually split since we are reading raw data to be safe
-    df = df.sort_values(['year', 'month', 'day', 'hour']).dropna()
-    
-    # Define features and target based on your schema
-    target = 'aqi'
-    # Drop target and metadata for X
-    X = df.drop(columns=[target], errors='ignore')
-    y = df[[target]]
 
-    # Split 80/20
+    # Manual Clean & Split
+    df = df.sort_values(['year', 'month', 'day', 'hour']).dropna()
+    target = 'aqi'
+    X = df.drop(columns=[target], errors='ignore')
+    y = df[target]
+
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-    print(f"✅ Data Loaded. Training on {len(X_train)} rows.")
+    print(f"✅ Data Ready. Rows: {len(X_train)}")
 
     # 3. TOURNAMENT
-    models = {"XGBoost": XGBRegressor(n_estimators=100), "RandomForest": RandomForestRegressor(n_estimators=100), "Ridge": Ridge(alpha=1.0)}
+    models = {"XGBoost": XGBRegressor(n_estimators=100), "RandomForest": RandomForestRegressor(n_estimators=100)}
     best_model, best_rmse, best_name = None, float('inf'), ""
-    
     for name, model in models.items():
         model.fit(X_train, y_train.values.ravel())
         rmse = root_mean_squared_error(y_test, model.predict(X_test))
@@ -87,7 +81,7 @@ def run_pipeline():
         if rmse < best_rmse: best_rmse, best_model, best_name = rmse, model, name
 
     # 4. SAVE MODEL TO REGISTRY
-    print(f"🌟 Registering Best Model: {best_name}")
+    print(f"🌟 Saving {best_name} to Model Registry...")
     model_dir = "karachi_aqi_model"
     if not os.path.exists(model_dir): os.makedirs(model_dir)
     joblib.dump(best_model, f"{model_dir}/model.pkl")
@@ -95,7 +89,7 @@ def run_pipeline():
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description=f"Best model ({best_name}) trained on daily update."
+        description=f"Automated daily retraining."
     )
     karachi_model.save(model_dir)
     
@@ -103,12 +97,11 @@ def run_pipeline():
     X_forecast, timestamps = get_forecast_features()
     last_known = X_train.iloc[-1]
     
-    # Ensure forecast has all necessary columns from X_train
     for col in X_train.columns:
         if col not in X_forecast.columns:
             X_forecast[col] = last_known[col]
             
-    X_forecast = X_forecast[X_train.columns] # Match order
+    X_forecast = X_forecast[X_train.columns] # Ensure column order
     
     preds = best_model.predict(X_forecast)
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
@@ -117,8 +110,9 @@ def run_pipeline():
 
     try:
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+        # Insertion works because it's the same method your Hourly Bot uses
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS! Forecast and Model Version {karachi_model.version} stored.")
+        print(f"✅ SUCCESS! Model V{karachi_model.version} and 72-hour forecast updated.")
     except Exception as e:
         print(f"❌ Error during insertion: {e}")
 

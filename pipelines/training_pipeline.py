@@ -4,8 +4,6 @@ import pandas as pd
 import hopsworks
 import joblib
 import shutil
-import time
-from datetime import datetime
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
@@ -63,28 +61,29 @@ def run_pipeline():
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    # 2. FETCH DATA WITHOUT TRAIN_TEST_SPLIT (STABILITY FIX)
-    print("📥 Pulling data using Get Batch Data (Stable Method)...")
-    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
+    # 2. FETCH DATA VIA SQL (Bypassing Feature View/Arrow Flight entirely)
+    print("📥 Pulling data via SQL query (The most stable method)...")
     
-    # We use get_batch_data with use_hive=True. 
-    # This is the most stable way to get data in a remote GitHub runner.
-    full_df = feature_view.get_batch_data(read_options={"use_hive": True})
-    
+    # Replace 'karachi_aqi_1' with your actual feature group name if different
+    # We select all columns from the feature group directly
+    query = "SELECT * FROM karachi_aqi_1" 
+    try:
+        full_df = fs.sql(query)
+    except Exception:
+        # Fallback if your FG name has a version suffix or different name
+        print("⚠️ Direct SQL failed, trying alternative name...")
+        full_df = fs.sql("SELECT * FROM karachi_aqi")
+
     print(f"📊 Data loaded: {len(full_df)} rows. Splitting manually...")
     
-    # Manually split since the built-in split uses the failing service
+    # 3. SPLIT & CLEAN
     target = "aqi"
     y = full_df[[target]]
     X = full_df.drop(columns=[target])
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # 3. DATA CLEANING
-    X_train = X_train.dropna()
-    y_train = y_train.loc[X_train.index]
-    X_test = X_test.dropna()
-    y_test = y_test.loc[X_test.index]
+    X_train, X_test = X_train.dropna(), X_test.dropna()
+    y_train, y_test = y_train.loc[X_train.index], y_test.loc[X_test.index]
 
     # 4. MODEL TOURNAMENT
     print("🏆 Starting Model Tournament...")
@@ -141,7 +140,7 @@ def run_pipeline():
         print("🚀 Inserting predictions...")
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS!")
+        print(f"✅ SUCCESS! Training and Forecast Complete.")
     except Exception as e:
         print(f"❌ Error during insertion: {e}")
 

@@ -2,8 +2,8 @@ name: Daily_Model_Training
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs exactly at midnight UTC every day
-  workflow_dispatch:      # Allows you to trigger it manually for testing
+    - cron: '0 0 * * *' 
+  workflow_dispatch:      
 
 jobs:
   train_and_predict:
@@ -17,22 +17,17 @@ jobs:
         with:
           python-version: '3.10'
           cache: 'pip'
-          # This tells the action where your requirements are for caching
           cache-dependency-path: 'requirements.txt'
 
       - name: Install Dependencies
         run: |
-          # Upgrade pip first to ensure pyarrow wheels install correctly
           python -m pip install --upgrade pip
-          # Install hopsworks with the python extras
-          pip install "hopsworks[python]"
-          # Install everything else from your requirements file
+          # We install standard hopsworks without [python] extras to avoid pyarrow
+          pip install hopsworks
           pip install -r requirements.txt
 
       - name: Run Training Pipeline
         env:
-          # These secrets must be set in your GitHub Repository Settings
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
-          # The ultimate kill-switch for Arrow Flight errors
           HSFS_DISABLE_FLIGHT_CLIENT: "True" 
         run: python pipelines/training_pipeline.py

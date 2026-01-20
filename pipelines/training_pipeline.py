@@ -61,11 +61,16 @@ def run_pipeline():
     fs = project.get_feature_store()
 
     # 2. FETCH TRAINING DATA
-    print("📥 Pulling training data from Feature View...")
+    # 2. FETCH TRAINING DATA
+    print("📥 Pulling training data from Feature View (Forcing Hive fallback)...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
-    
-    # read_options helps ensure we aren't using flight if the env var isn't enough
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
+
+    # 🔥 FIX: Specifically tell the engine to use Hive instead of Arrow Flight
+    # This bypasses the port/connection errors entirely.
+    X_train, X_test, y_train, y_test = feature_view.train_test_split(
+        test_size=0.2,
+        read_options={"use_hive": True} 
+    )
 
     # DATA CLEANING
     print("🧹 Cleaning data (removing NaNs)...")

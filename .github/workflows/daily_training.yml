@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas requests xgboost scikit-learn joblib hopsworks
+          pip install pandas requests xgboost scikit-learn joblib hopsworks pyarrow
           # We explicitly avoid installing pyarrow here if it was causing issues, 
           # but Hopsworks usually requires it as a dependency. 
 

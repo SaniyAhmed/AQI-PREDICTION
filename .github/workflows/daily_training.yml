@@ -23,5 +23,6 @@ jobs:
 
       - name: Run Training Pipeline
         env:
+          # Mapping your GitHub Secret (WITH 'S') to the Python variable (WITHOUT 'S')
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
         run: python pipelines/training_pipeline.py

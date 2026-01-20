@@ -58,7 +58,7 @@ def get_forecast_features():
 
 def run_pipeline():
     # 1. LOGIN
-    api_key = os.getenv('MY_HOPSWORK_KEY') 
+    api_key = os.getenv('MY_HOPSWORKS_KEY') 
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 

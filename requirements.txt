@@ -6,6 +6,7 @@ pytz
 # --- Hopsworks & Data Engineering ---
 hopsworks
 confluent-kafka
+pyarrow
 
 # --- Machine Learning & Modeling ---
 xgboost

@@ -2,26 +2,31 @@ name: Karachi AQI Daily Pipeline
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs at midnight every day
-  workflow_dispatch: # Allows manual run
+    - cron: '0 0 * * *' # Runs every night at midnight
+  workflow_dispatch:    # Allows you to click "Run workflow" manually
 
 jobs:
-  build:
+  run-daily-ai:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      # STEP 1: MUST check out the code so the runner can see training_pipeline.py
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
+      # STEP 2: Setup Python environment
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
+      # STEP 3: Install specific compatible versions to avoid the Pandas/Numpy error
       - name: Install Dependencies
         run: |
-          pip install pandas requests hopsworks xgboost scikit-learn joblib
+          pip install numpy==1.26.4 pandas==2.2.2
+          pip install hopsworks xgboost scikit-learn joblib shap plotly
 
-      - name: Run Training Pipeline
+      # STEP 4: Run the script
+      - name: Run Backend Training
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
         run: python training_pipeline.py

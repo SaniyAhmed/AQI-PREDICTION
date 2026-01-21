@@ -1,5 +1,4 @@
 # --- Core Data & API ---
-pandas
 requests
 pytz
 
@@ -16,3 +15,8 @@ joblib
 # --- Utilities ---
 datetime
 # os, time, shutil are built-in and do not need to be listed
+numpy==1.26.4
+pandas==2.2.2
+streamlit
+plotly
+shap

@@ -1,0 +1,27 @@
+name: Karachi AQI Daily Pipeline
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs at midnight every day
+  workflow_dispatch: # Allows manual run
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install pandas requests hopsworks xgboost scikit-learn joblib
+
+      - name: Run Training Pipeline
+        env:
+          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
+        run: python training_pipeline.py

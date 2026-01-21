@@ -23,7 +23,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install numpy==1.26.4 pandas==2.2.2
-          pip install hopsworks xgboost scikit-learn joblib shap plotly
+          pip install hopsworks xgboost scikit-learn joblib shap plotly pyarrow
 
       # STEP 4: Run the script
       - name: Run Backend Training

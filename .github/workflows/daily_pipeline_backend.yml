@@ -29,4 +29,4 @@ jobs:
       - name: Run Backend Training
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
-        run: python training_pipeline.py
+        run: python pipelines/training_pipeline.py

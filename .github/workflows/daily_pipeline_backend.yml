@@ -28,5 +28,5 @@ jobs:
       # STEP 4: Run the script
       - name: Run Backend Training
         env:
-          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
+          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
         run: python pipelines/training_pipeline.py

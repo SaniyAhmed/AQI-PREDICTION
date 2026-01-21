@@ -1,0 +1,20 @@
+# --- Core Data & API ---
+requests
+pytz
+
+# --- Hopsworks & Data Engineering ---
+hopsworks
+confluent-kafka
+pyarrow
+
+# --- Machine Learning & Modeling ---
+xgboost
+scikit-learn
+joblib
+
+# --- Utilities & UI ---
+numpy==1.26.4
+pandas==2.2.2
+streamlit
+plotly
+shap

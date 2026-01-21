@@ -6,7 +6,8 @@ import joblib
 import shutil
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import Ridge
+from sklearn.svm import SVR 
+from sklearn.preprocessing import RobustScaler  # Switched to RobustScaler
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
 
@@ -55,10 +56,9 @@ def run_pipeline():
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    # 2. AGGRESSIVE DATA FETCH (The "Brick" Logic)
+    # 2. AGGRESSIVE DATA FETCH
     print("📥 Attempting to find and read Feature Group...")
     full_df = None
-    # Try multiple common naming patterns you might have used
     possible_names = ["karachi_aqi", "karachi_aqi_1", "karachi_aqi_fg"]
     
     for name in possible_names:
@@ -74,13 +74,13 @@ def run_pipeline():
             continue
 
     if full_df is None:
-        print("🛑 ERROR: Could not find ANY feature group. Please check your Hopsworks Feature Store UI for the exact name.")
+        print("🛑 ERROR: Could not find ANY feature group.")
         return
 
     # 3. SPLIT & CLEAN
     target = "aqi"
     if target not in full_df.columns:
-        print(f"🛑 ERROR: Target column '{target}' not found in data! Columns: {full_df.columns}")
+        print(f"🛑 ERROR: Target column '{target}' not found!")
         return
 
     y = full_df[[target]]
@@ -89,17 +89,23 @@ def run_pipeline():
     X_train, X_test = X_train.dropna(), X_test.dropna()
     y_train, y_test = y_train.loc[X_train.index], y_test.loc[X_test.index]
 
+    # --- FEATURE SCALING (Robust for Outliers) ---
+    scaler = RobustScaler()  # Updated to RobustScaler
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
     # 4. MODEL TOURNAMENT
     print("🏆 Starting Model Tournament...")
     models = {
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5),
-        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10)
+        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10),
+        "SVR": SVR(kernel='rbf', C=10, epsilon=0.1) 
     }
 
     best_model, best_rmse, best_model_name = None, float('inf'), ""
     for name, model in models.items():
-        model.fit(X_train, y_train.values.ravel())
-        preds = model.predict(X_test)
+        model.fit(X_train_scaled, y_train.values.ravel())
+        preds = model.predict(X_test_scaled)
         rmse = root_mean_squared_error(y_test, preds)
         print(f"   - {name} RMSE: {rmse:.4f}")
         if rmse < best_rmse:
@@ -111,12 +117,14 @@ def run_pipeline():
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
+    
     joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
+    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description="Daily automated training via REST fallback."
+        description=f"Winner with Robust Scaling: {best_model_name}"
     )
     karachi_model.save(model_dir)
 
@@ -126,13 +134,15 @@ def run_pipeline():
     cols_to_persist = ['pm10', 'co', 'aqi_lag_1', 'aqi_lag_2', 'pm25_lag_1']
     for col in cols_to_persist:
         if col in last_known: X_forecast[col] = last_known[col]
-        else: X_forecast[col] = 0 # Fallback for missing features
+        else: X_forecast[col] = 0 
     
     X_forecast['aqi_change_rate'] = 0.0
     X_forecast = X_forecast[X_train.columns]
 
+    X_forecast_scaled = scaler.transform(X_forecast)
+
     print("🔮 Generating future predictions...")
-    preds = best_model.predict(X_forecast)
+    preds = best_model.predict(X_forecast_scaled)
 
     # 7. PREPARE DATAFRAME
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
@@ -144,7 +154,7 @@ def run_pipeline():
         print("🚀 Inserting predictions into karachi_aqi_forecast...")
         forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
         forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS!")
+        print(f"✅ SUCCESS! Best model was {best_model_name}")
     except Exception as e:
         print(f"❌ Error during insertion: {e}")
 

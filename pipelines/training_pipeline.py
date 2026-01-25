@@ -1,5 +1,5 @@
 import os
-# --- THE GITHUB ACTIONS FIX ---
+# --- SAFE ADDITION FOR GITHUB ACTIONS ---
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -21,7 +21,9 @@ KARACHI_LON = 67.0011
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
+    """Fetches future weather/pollutants to predict the next 3 days."""
     print("🌐 Fetching 72-hour Forecast Data...")
+    
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
@@ -61,31 +63,27 @@ def run_pipeline():
     fs = project.get_feature_store()
 
     # 2. FETCH DATA FROM VERSION 3 VIEW
+    # CHANGED: Using get_batch_data() and local split for GitHub stability
     print("📥 Accessing Feature View V3...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    # Logic fix: Use get_batch_data() which works for Feature Views
     try:
-        print("尝试进行数据读取 (Local Split Strategy)...")
-        # read_options forces a direct download which is safer for GitHub
-        full_df = feature_view.get_batch_data() 
-        
+        full_df = feature_view.get_batch_data()
         target = "aqi"
         y = full_df[[target]]
         X = full_df.drop(columns=[target])
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        print(f"✅ Data loaded successfully. Rows: {len(full_df)}")
     except Exception as e:
-        print(f"❌ Critical failure reading data: {e}")
-        return
-
+        print(f"⚠️ Query Service hurdle, attempting fallback: {e}")
+        X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
+    
     # 3. CLEAN & SCALE
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
     # 4. MODEL TOURNAMENT
-    print("🏆 Training Model Tournament...")
+    print("🏆 Training Model Tournament (V3 Hybrid Data)...")
     models = {
         "XGBoost": XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6),
         "RandomForest": RandomForestRegressor(n_estimators=150, max_depth=12),
@@ -101,12 +99,13 @@ def run_pipeline():
         if rmse < best_rmse:
             best_rmse, best_model, best_model_name = rmse, model, name
 
-    # 5. SAVE WINNING MODEL
-    print(f"📦 Saving {best_model_name} (RMSE: {best_rmse:.2f})")
+    # 5. SAVE WINNING MODEL TO REGISTRY
+    print(f"📦 Best Model: {best_model_name} (RMSE: {best_rmse:.2f})")
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     
+    # Keeping your exact filenames so nothing downstream breaks
     joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
@@ -114,11 +113,12 @@ def run_pipeline():
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description=f"Winner V3: {best_model_name}"
+        description=f"Winner V3: {best_model_name} with all pollutants."
     )
+    # This saves the entire FOLDER (pkl + scaler) to the registry
     karachi_model.save(model_dir)
 
-    # 6. FORECAST
+    # 6. GENERATE 3-DAY FORECAST
     X_forecast, timestamps = get_forecast_features(X_train.columns.tolist())
     X_forecast_scaled = scaler.transform(X_forecast)
     future_preds = best_model.predict(X_forecast_scaled)
@@ -128,23 +128,28 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = future_preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 8. INSERTION WITH RETRY
+    # 8. ROBUST INSERTION (Retry Logic to avoid Remote Disconnect)
     max_retries = 3
     for attempt in range(max_retries):
         try:
+            print(f"🚀 Attempt {attempt+1}: Registering Forecast FG...")
             forecast_fg = fs.get_or_create_feature_group(
                 name="karachi_aqi_forecast",
                 version=1,
                 primary_key=['year', 'month', 'day', 'hour'],
-                description="3-Day Predicted AQI",
+                description="3-Day Predicted AQI for Karachi",
                 online_enabled=True
             )
+            print("📤 Uploading forecast rows...")
             forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-            print(f"✅ SUCCESS! Best model {best_model_name} synced.")
+            print(f"✅ SUCCESS! Best model {best_model_name} synced to Dashboard.")
             break 
         except Exception as e:
             print(f"⚠️ Attempt {attempt+1} failed: {e}")
-            time.sleep(10)
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                print("❌ Final Attempt failed. Please check your internet connection.")
 
 if __name__ == "__main__":
     run_pipeline()

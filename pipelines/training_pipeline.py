@@ -63,18 +63,21 @@ def run_pipeline():
     fs = project.get_feature_store()
 
     # 2. FETCH DATA FROM VERSION 3 VIEW
-    # CHANGED: Using get_batch_data() and local split for GitHub stability
     print("📥 Accessing Feature View V3...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
     try:
-        full_df = feature_view.get_batch_data()
+        # THE FIX: force use of the Python engine to bypass Arrow Flight errors
+        full_df = feature_view.get_batch_data(read_options={"use_hive": True}) 
+        
         target = "aqi"
         y = full_df[[target]]
         X = full_df.drop(columns=[target])
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        print("✅ Data successfully pulled via Hive/Python engine.")
     except Exception as e:
-        print(f"⚠️ Query Service hurdle, attempting fallback: {e}")
+        print(f"⚠️ Query Service hurdle, attempting training dataset fallback: {e}")
+        # Secondary fallback: Use the built-in split if get_batch_data fails
         X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
     
     # 3. CLEAN & SCALE
@@ -105,7 +108,6 @@ def run_pipeline():
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     
-    # Keeping your exact filenames so nothing downstream breaks
     joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
@@ -115,7 +117,6 @@ def run_pipeline():
         metrics={"rmse": best_rmse},
         description=f"Winner V3: {best_model_name} with all pollutants."
     )
-    # This saves the entire FOLDER (pkl + scaler) to the registry
     karachi_model.save(model_dir)
 
     # 6. GENERATE 3-DAY FORECAST
@@ -128,7 +129,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = future_preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 8. ROBUST INSERTION (Retry Logic to avoid Remote Disconnect)
+    # 8. ROBUST INSERTION
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -149,7 +150,7 @@ def run_pipeline():
             if attempt < max_retries - 1:
                 time.sleep(5)
             else:
-                print("❌ Final Attempt failed. Please check your internet connection.")
+                print("❌ Final Attempt failed.")
 
 if __name__ == "__main__":
     run_pipeline()

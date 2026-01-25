@@ -1,5 +1,5 @@
 import os
-# Force disable the flight client at the OS level
+# --- 1. THE AGGRESSIVE KILL-SWITCH ---
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -65,25 +65,20 @@ def run_pipeline():
     print("📥 Accessing Feature View V3...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    # --- THE CRITICAL FIX ---
-    # read_options={"use_hive": True} bypasses the Arrow Flight Client
-    print("🔄 Reading batch data via Hive connector (restricting Flight client)...")
+    # --- THE "FORCE PYTHON" FIX ---
+    # We use .read() instead of get_batch_data() because .read() 
+    # allows us to force the 'python' engine, which doesn't use Arrow Flight.
+    print("🔄 Forcing Python Engine (Bypassing Query Service)...")
     try:
-        full_df = feature_view.get_batch_data(read_options={"use_hive": True})
+        full_df = feature_view.read(engine="python")
         
         target = "aqi"
-        if target not in full_df.columns:
-             # If target is missing from batch, try to find it or use fallback
-             print(f"⚠️ Target '{target}' not in batch. Available: {full_df.columns.tolist()}")
-             # Some views require reading the training dataset directly if batch doesn't include target
-             X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
-        else:
-            y = full_df[[target]]
-            X = full_df.drop(columns=[target])
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            
+        y = full_df[[target]]
+        X = full_df.drop(columns=[target])
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        print("✅ Data successfully loaded via Python connector.")
     except Exception as e:
-        print(f"⚠️ Batch read failed, attempting direct train_test_split fallback: {e}")
+        print(f"⚠️ Python read failed, using training dataset split: {e}")
         X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
 
     # 3. CLEAN & SCALE
@@ -108,8 +103,8 @@ def run_pipeline():
         if rmse < best_rmse:
             best_rmse, best_model, best_model_name = rmse, model, name
 
-    # 5. SAVE WINNING MODEL
-    print(f"📦 Best Model: {best_model_name} (RMSE: {best_rmse:.2f})")
+    # 5. SAVE WINNING MODEL & SCALER
+    print(f"📦 Best Model: {best_model_name}")
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -121,11 +116,11 @@ def run_pipeline():
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description=f"Winner V3: {best_model_name}."
+        description=f"Winner V3 Hybrid: {best_model_name}."
     )
     karachi_model.save(model_dir)
 
-    # 6. FORECAST & INSERTION (Keeping your existing working logic)
+    # 6. FORECAST (Your original working logic)
     X_forecast, timestamps = get_forecast_features(X_train.columns.tolist())
     X_forecast_scaled = scaler.transform(X_forecast)
     future_preds = best_model.predict(X_forecast_scaled)
@@ -134,22 +129,18 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = future_preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            forecast_fg = fs.get_or_create_feature_group(
-                name="karachi_aqi_forecast",
-                version=1,
-                primary_key=['year', 'month', 'day', 'hour'],
-                description="3-Day Predicted AQI",
-                online_enabled=True
-            )
-            forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-            print(f"✅ SUCCESS! Model synced.")
-            break 
-        except Exception as e:
-            print(f"⚠️ Attempt {attempt+1} failed: {e}")
-            time.sleep(5)
+    # 7. UPLOAD FORECAST
+    try:
+        forecast_fg = fs.get_or_create_feature_group(
+            name="karachi_aqi_forecast",
+            version=1,
+            primary_key=['year', 'month', 'day', 'hour'],
+            online_enabled=True
+        )
+        forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
+        print(f"✅ SUCCESS! Best model synced.")
+    except Exception as e:
+        print(f"⚠️ Final insertion error: {e}")
 
 if __name__ == "__main__":
     run_pipeline()

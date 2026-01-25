@@ -1,5 +1,5 @@
 import os
-# --- 1. THE AGGRESSIVE KILL-SWITCH ---
+# --- THE GITHUB ACTIONS FIX ---
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -21,7 +21,6 @@ KARACHI_LON = 67.0011
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
-    """Fetches future weather/pollutants to predict the next 3 days."""
     print("🌐 Fetching 72-hour Forecast Data...")
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
@@ -65,21 +64,20 @@ def run_pipeline():
     print("📥 Accessing Feature View V3...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    # --- THE "FORCE PYTHON" FIX ---
-    # We use .read() instead of get_batch_data() because .read() 
-    # allows us to force the 'python' engine, which doesn't use Arrow Flight.
-    print("🔄 Forcing Python Engine (Bypassing Query Service)...")
+    # Logic fix: Use get_batch_data() which works for Feature Views
     try:
-        full_df = feature_view.read(engine="python")
+        print("尝试进行数据读取 (Local Split Strategy)...")
+        # read_options forces a direct download which is safer for GitHub
+        full_df = feature_view.get_batch_data() 
         
         target = "aqi"
         y = full_df[[target]]
         X = full_df.drop(columns=[target])
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        print("✅ Data successfully loaded via Python connector.")
+        print(f"✅ Data loaded successfully. Rows: {len(full_df)}")
     except Exception as e:
-        print(f"⚠️ Python read failed, using training dataset split: {e}")
-        X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
+        print(f"❌ Critical failure reading data: {e}")
+        return
 
     # 3. CLEAN & SCALE
     scaler = RobustScaler()
@@ -103,8 +101,8 @@ def run_pipeline():
         if rmse < best_rmse:
             best_rmse, best_model, best_model_name = rmse, model, name
 
-    # 5. SAVE WINNING MODEL & SCALER
-    print(f"📦 Best Model: {best_model_name}")
+    # 5. SAVE WINNING MODEL
+    print(f"📦 Saving {best_model_name} (RMSE: {best_rmse:.2f})")
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -116,31 +114,37 @@ def run_pipeline():
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse},
-        description=f"Winner V3 Hybrid: {best_model_name}."
+        description=f"Winner V3: {best_model_name}"
     )
     karachi_model.save(model_dir)
 
-    # 6. FORECAST (Your original working logic)
+    # 6. FORECAST
     X_forecast, timestamps = get_forecast_features(X_train.columns.tolist())
     X_forecast_scaled = scaler.transform(X_forecast)
     future_preds = best_model.predict(X_forecast_scaled)
 
+    # 7. PREPARE DATAFRAME
     forecast_df = X_forecast[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = future_preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. UPLOAD FORECAST
-    try:
-        forecast_fg = fs.get_or_create_feature_group(
-            name="karachi_aqi_forecast",
-            version=1,
-            primary_key=['year', 'month', 'day', 'hour'],
-            online_enabled=True
-        )
-        forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
-        print(f"✅ SUCCESS! Best model synced.")
-    except Exception as e:
-        print(f"⚠️ Final insertion error: {e}")
+    # 8. INSERTION WITH RETRY
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            forecast_fg = fs.get_or_create_feature_group(
+                name="karachi_aqi_forecast",
+                version=1,
+                primary_key=['year', 'month', 'day', 'hour'],
+                description="3-Day Predicted AQI",
+                online_enabled=True
+            )
+            forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
+            print(f"✅ SUCCESS! Best model {best_model_name} synced.")
+            break 
+        except Exception as e:
+            print(f"⚠️ Attempt {attempt+1} failed: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
     run_pipeline()

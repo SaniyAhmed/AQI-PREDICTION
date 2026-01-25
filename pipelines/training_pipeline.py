@@ -1,4 +1,8 @@
 import os
+# --- 1. THE CRITICAL GITHUB ACTIONS FIX ---
+# This disables the high-speed Flight client which often fails on GitHub runners
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+
 import requests
 import pandas as pd
 import hopsworks
@@ -56,14 +60,29 @@ def get_forecast_features(trained_columns):
 def run_pipeline():
     # 1. LOGIN
     api_key = os.getenv('MY_HOPSWORK_KEY') 
+    if not api_key:
+        print("❌ Error: MY_HOPSWORK_KEY environment variable not found.")
+        return
+
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
 
-    # 2. FETCH DATA FROM VERSION 3 VIEW
+    # 2. FETCH DATA FROM VERSION 3 VIEW (With Fallback for GitHub Actions)
     print("📥 Accessing Feature View V3...")
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
     
+    try:
+        print("尝试进行高性能训练数据读取...")
+        X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
+    except Exception as e:
+        print(f"⚠️ Query Service failed: {e}")
+        print("🔄 Falling back to standard HTTP read (Local Split Strategy)...")
+        full_df = feature_view.read()
+        target = "aqi"
+        y = full_df[[target]]
+        X = full_df.drop(columns=[target])
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
     # 3. CLEAN & SCALE
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -113,7 +132,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = future_preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = timestamps.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 8. ROBUST INSERTION (Retry Logic to avoid Remote Disconnect)
+    # 8. ROBUST INSERTION (Retry Logic)
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -132,9 +151,9 @@ def run_pipeline():
         except Exception as e:
             print(f"⚠️ Attempt {attempt+1} failed: {e}")
             if attempt < max_retries - 1:
-                time.sleep(5)
+                time.sleep(10) # Longer wait for cloud stability
             else:
-                print("❌ Final Attempt failed. Please check your internet connection.")
+                print("❌ Final Attempt failed. GitHub Action might be experiencing network lag.")
 
 if __name__ == "__main__":
     run_pipeline()

@@ -1,5 +1,5 @@
 import os
-# Force disable the flight client at the OS level
+# Force disable the high-speed flight client
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -49,24 +49,27 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 Retrieving Data via Online REST API (Total Bypass of Flight Service)...")
-    # --- THE ABSOLUTE FIX ---
-    # We do NOT use the Feature View to read data. 
-    # Reading directly from the Feature Group with online=True uses standard HTTPS.
-    # This completely avoids the hsfs.core.arrow_flight_client code.
+    print("📥 Retrieving Data via REST Preview (Bypassing Flight and Online-Sync issues)...")
+    # --- THE CRITICAL FIX ---
+    # .read(online=True) was returning 0 rows because the online store wasn't synced.
+    # .select_all().show(n) pulls from the OFFLINE store but uses the REST API (HTTPS).
+    # This avoids the Arrow Flight error AND the 'n_samples=0' error.
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
-    df = fg.read(online=True)
+    df = fg.select_all().show(5000) # Fetches up to 5000 rows via REST
+    
+    if df.empty:
+        raise ValueError("The DataFrame is empty! Please check if your 'karachi_aqi' Feature Group has data in Hopsworks.")
     
     # Identify target and features
     target_col = 'pm25' 
     if target_col not in df.columns:
-        # Fallback to find any column containing 'pm2'
         target_col = [col for col in df.columns if 'pm2' in col.lower()][0]
         
     y = df[[target_col]]
     X = df.drop(columns=[target_col])
 
-    # Splitting locally in the GitHub Runner memory
+    # Splitting locally
+    print(f"📊 Training on {len(df)} rows...")
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
@@ -106,7 +109,6 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        # Save and upload model to Hopsworks Model Registry
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -114,14 +116,13 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
-        # Registering back to Hopsworks
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 
             description=f"Tournament Participant: {name}"
         )
         current_model.save(iter_model_dir)
-        print(f"✅ {name} registered in Hopsworks.")
+        print(f"✅ {name} registered.")
 
         if cv_rmse < best_rmse:
             best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
@@ -136,7 +137,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. FORECAST UPLOAD (Back to Hopsworks)
+    # 7. FORECAST UPLOAD
     print("🚀 Uploading Results to Hopsworks...")
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
@@ -149,7 +150,7 @@ def run_pipeline():
     for attempt in range(3):
         try:
             fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
-            print(f"✅ SUCCESS! Results sent to Hopsworks.")
+            print(f"✅ SUCCESS!")
             break
         except Exception as e:
             print(f"⚠️ Attempt failed: {e}")

@@ -50,20 +50,24 @@ def run_pipeline():
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Data via Hive (Bypassing Arrow Flight)...")
+    print("📥 Retrieving Data via Batch Query (Bypassing Arrow Flight)...")
     # --- THE 100% FIX ---
-    # .read() with use_hive=True is the most stable way to pull data in restricted networks.
-    # It avoids the arrow_flight_client.py logic entirely.
-    df = feature_view.read(read_options={"use_hive": True})
+    # get_batch_data with use_hive=True avoids the arrow_flight_client.py code path entirely.
+    # This ensures the data is fetched over standard port 443.
+    df = feature_view.get_batch_data(read_options={"use_hive": True})
     
     # Identify target and features
-    # Note: Ensure 'pm25' (or your target column name) matches your Feature Store
+    # Standard AQI pipelines use 'pm25' as target. Adjust if your column name differs.
     target_col = 'pm25' 
+    if target_col not in df.columns:
+        # Dynamic check to prevent failure if column name is different
+        target_col = [col for col in df.columns if 'pm2' in col.lower()][0]
+        
     y = df[[target_col]]
     X = df.drop(columns=[target_col])
 
-    # Splitting locally to avoid the Hopsworks Query Service split logic
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+    # Splitting locally in the GitHub Runner memory
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
@@ -72,7 +76,7 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # 🏆 TOURNAMENT SETUP (Logic unchanged)
+    # 🏆 TOURNAMENT SETUP (Logic untouched)
     param_grids = {
         "RandomForest": {"n_estimators": [50, 100], "max_depth": [10, 20], "min_samples_split": [2, 5]},
         "XGBoost": {"n_estimators": [50, 100], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},

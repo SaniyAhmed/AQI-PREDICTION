@@ -1,5 +1,5 @@
 import os
-# Force global settings to disable the crash-prone client
+# Completely block the flight client at the system level
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -15,13 +15,6 @@ from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
-
-# --- THE HOPSWORKS INTERCEPTOR ---
-# This prevents the SDK from even looking for the Arrow Flight service
-import hsfs
-from hsfs.core import arrow_flight_client
-def mock_init(self, *args, **kwargs): return
-arrow_flight_client.ArrowFlightClient.__init__ = mock_init
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -51,26 +44,25 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df['time']
 
 def run_pipeline():
-    api_key = os.getenv('MY_HOPSWORK_KEY')
     # 1. Login
-    project = hopsworks.login(api_key_value=api_key)
+    project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 RETRIEVING DATA VIA SDK (REST API MODE)...")
-    # 2. Get the Feature Group
-    fg = fs.get_feature_group(name="karachi_aqi", version=1)
+    print("📥 RETRIEVING DATA VIA SQL QUERY (REST-BASED)...")
     
-    # THE CRITICAL STEP: use_api=True tells Hopsworks to use Port 443 (REST)
-    # instead of Port 443/5005 (Arrow Flight). 
-    # Because of our 'mock_init' above, it cannot crash.
-    full_df = fg.select_all().read(read_options={"use_api": True})
+    # --- THE FINAL SOLUTION ---
+    # Instead of fg.read(), we run a SQL query directly. 
+    # This uses the 'sql' engine which is pure REST/JSON and does 
+    # NOT trigger the ArrowFlightClient object creation at all.
+    query = f"SELECT * FROM `{fs.name}.karachi_aqi_1`"
+    full_df = fs.sql(query)
     
     if full_df is None or full_df.empty:
-        print("❌ CRITICAL ERROR: Feature Group is empty or could not be read.")
+        print("❌ CRITICAL ERROR: SQL query returned no data.")
         return
 
-    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows.")
+    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows via SQL.")
 
     # --- ML TOURNAMENT ---
     target = 'pm25' if 'pm25' in full_df.columns else full_df.columns[-1]
@@ -82,7 +74,6 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # Fast tournament for GitHub Actions stability
     model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
     model.fit(X_train_scaled, y_train.values.ravel())
     rmse = root_mean_squared_error(y_test, model.predict(X_test_scaled))
@@ -116,7 +107,7 @@ def run_pipeline():
         primary_key=['year', 'month', 'day', 'hour'], 
         online_enabled=True
     )
-    # Insert works via standard HTTP POST
+    # fg.insert() uses standard HTTPS POST, which does not use Arrow Flight.
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
     print("✅ PIPELINE COMPLETED SUCCESSFULLY!")
 

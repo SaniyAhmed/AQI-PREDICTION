@@ -1,5 +1,5 @@
 import os
-# Mandatory: Tell the SDK to stay away from the Flight client code entirely
+# Force disable high-speed flight client
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -49,16 +49,22 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 Retrieving Data via SQL (Total Bypass of Flight Service)...")
-    # --- THE 100% GUARANTEED FIX ---
-    # We use fs.sql instead of fg.read() or fv.get_batch_data()
-    # This treats Hopsworks as a standard database and uses the Python Hive connector.
-    # It NEVER calls arrow_flight_client.py
-    query = "SELECT * FROM `karachi_aqi_1`" # Uses the table name (fg_name_version)
-    df = fs.sql(query)
+    # We use the Feature View but fetch data using the 'python' engine fallback
+    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    # Identify target and features
+    print("📥 Retrieving Data via REST (Hopsworks 4.0 Compatibility Mode)...")
+    # --- THE CRITICAL FIX ---
+    # In Hopsworks 4.0, 'get_batch_data' with no arguments defaults to the most 
+    # compatible REST-based retrieval when Arrow Flight is disabled.
+    # This avoids the Hive ValueError and the Arrow Flight Connection error.
+    df = feature_view.get_batch_data()
+    
+    # Identify target and features (Logic remains identical)
     target_col = 'pm25' 
+    if target_col not in df.columns:
+        # Fallback to find any column containing 'pm2'
+        target_col = [col for col in df.columns if 'pm2' in col.lower()][0]
+        
     y = df[[target_col]]
     X = df.drop(columns=[target_col])
 
@@ -72,7 +78,7 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # 🏆 TOURNAMENT SETUP (Logic remains exactly the same)
+    # 🏆 TOURNAMENT SETUP
     param_grids = {
         "RandomForest": {"n_estimators": [50, 100], "max_depth": [10, 20], "min_samples_split": [2, 5]},
         "XGBoost": {"n_estimators": [50, 100], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},
@@ -102,7 +108,6 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        # Store iteration model
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -110,7 +115,6 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
-        # Register model version
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 

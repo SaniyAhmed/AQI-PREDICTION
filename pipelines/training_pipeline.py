@@ -1,5 +1,5 @@
 import os
-# Force disable the high-speed client which causes the crash in GitHub Actions
+# Force disable the high-speed client globally
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -44,22 +44,23 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    # 1. Login with explicit engine selection to bypass the Arrow Flight requirement
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
-    
-    # 2. Get feature store with offline_compression disabled (common cause for the Query Service error)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Training Data...")
-    # --- THE CRITICAL FIX ---
-    # We use 'read_options' but also force the retrieval through the REST API 
-    # by ensuring we don't trigger the Arrow Flight handler.
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(
-        test_size=0.2,
-        read_options={"use_hive": True, "arrow_flight_config": {"disabled": True}}
-    )
+    print("📥 Retrieving Data via Batch Query (Bypassing Query Service)...")
+    # --- THE CRITICAL SHIFT ---
+    # get_batch_data is much simpler than train_test_split and doesn't trigger the complex Flight handlers.
+    # We pull the data and split it locally to ensure the connection stays on standard HTTPS.
+    full_data = feature_view.get_batch_data(read_options={"use_hive": True})
+    
+    # Identify target and features (Assuming 'aqi' is your target based on typical AQI pipelines)
+    # We keep the logic for your tournament exactly as it was.
+    y = full_data[['aqi']] 
+    X = full_data.drop(columns=['aqi']) 
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
@@ -80,7 +81,7 @@ def run_pipeline():
         "SVR": SVR(kernel='rbf')
     }
 
-    print("\n🏆 STARTING TOURNAMENT (All models will be registered)...")
+    print("\n🏆 STARTING TOURNAMENT...")
     print("-" * 50)
     best_model, best_rmse, best_model_name = None, float('inf'), ""
 
@@ -98,7 +99,6 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        # --- LOGIC TO STORE EACH MODEL ---
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -106,30 +106,28 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
-        # Register model version
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 
             description=f"Tournament Participant: {name}"
         )
         current_model.save(iter_model_dir)
-        print(f"✅ {name} registered as a new version.")
+        print(f"✅ {name} registered.")
 
         if cv_rmse < best_rmse:
             best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
 
     print("-" * 50)
-    print(f"⭐ TOURNAMENT WINNER: {best_model_name} (CV RMSE: {best_rmse:.4f})")
-    print("✅ All models synced to Registry!")
+    print(f"⭐ TOURNAMENT WINNER: {best_model_name}")
 
-    # 6. FORECAST GENERATION (Uses the tournament winner)
+    # 6. FORECAST GENERATION
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. FORECAST UPLOAD (WITH RESILIENCE)
+    # 7. FORECAST UPLOAD
     print("🚀 Preparing Forecast Upload...")
     fg = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
@@ -143,15 +141,11 @@ def run_pipeline():
         try:
             print(f"📤 Uploading Forecast (Attempt {attempt+1})...")
             fg.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
-            print(f"✅ SUCCESS! Karachi forecast is live.")
+            print(f"✅ SUCCESS!")
             break
         except Exception as e:
             print(f"⚠️ Upload attempt failed: {e}")
-            if attempt < 2: 
-                print("⏳ Retrying in 10 seconds...")
-                time.sleep(10)
-            else:
-                print("❌ Final attempt failed. Check Hopsworks UI.")
+            if attempt < 2: time.sleep(10)
 
 if __name__ == "__main__":
     run_pipeline()

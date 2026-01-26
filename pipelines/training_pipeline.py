@@ -1,5 +1,5 @@
 import os
-# Mandatory for GitHub Actions to bypass the Arrow Flight connection
+# Force disable the high-speed client which causes the crash in GitHub Actions
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -44,15 +44,18 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
+    # Login and get project
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
     print("📥 Retrieving Training Data...")
-    # FIX: Explicitly using 'use_hive' bypasses the failing Arrow Flight/Query Service in GitHub Actions
+    # --- CRITICAL CHANGE FOR GITHUB ACTIONS ---
+    # We use 'use_hive': True because GitHub Actions blocks the 'Arrow Flight' ports.
+    # This forces the data to come through the standard Hive/REST port.
     X_train, X_test, y_train, y_test = feature_view.train_test_split(
-        test_size=0.2, 
+        test_size=0.2,
         read_options={"use_hive": True}
     )
     
@@ -99,7 +102,7 @@ def run_pipeline():
         os.makedirs(iter_model_dir)
         
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
-        joblib.dump(scaler, f"{iter_model_dir Pyarrow-3}/scaler.pkl")
+        joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
         # Register model version
         current_model = mr.python.create_model(

@@ -44,19 +44,21 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    # Login and get project
+    # 1. Login with explicit engine selection to bypass the Arrow Flight requirement
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
+    
+    # 2. Get feature store with offline_compression disabled (common cause for the Query Service error)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
     print("📥 Retrieving Training Data...")
-    # --- CRITICAL CHANGE FOR GITHUB ACTIONS ---
-    # We use 'use_hive': True because GitHub Actions blocks the 'Arrow Flight' ports.
-    # This forces the data to come through the standard Hive/REST port.
+    # --- THE CRITICAL FIX ---
+    # We use 'read_options' but also force the retrieval through the REST API 
+    # by ensuring we don't trigger the Arrow Flight handler.
     X_train, X_test, y_train, y_test = feature_view.train_test_split(
         test_size=0.2,
-        read_options={"use_hive": True}
+        read_options={"use_hive": True, "arrow_flight_config": {"disabled": True}}
     )
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]

@@ -1,5 +1,5 @@
 import os
-# --- MANDATORY FOR 4.0+ OUTSIDE THE PLATFORM ---
+# Force disable Flight to prevent the 'Could not read data using Query Service' error
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -51,12 +51,12 @@ def run_pipeline():
     # 2. Get Feature View
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Training Data using get_batch_data()...")
-    # This method is REST-based and compatible with Hopsworks 4.0
-    data_df = feature_view.get_batch_data() 
+    print("📥 Retrieving Training Data via REST engine...")
+    # CRITICAL CHANGE: read_options={"use_api": True} forces standard HTTP REST
+    # This bypasses the Arrow Flight engine that is crashing in GitHub
+    data_df = feature_view.get_batch_data(read_options={"use_api": True}) 
     
     # 3. Pre-process
-    # Ensure 'aqi' matches your target column name exactly in Hopsworks
     y = data_df[['aqi']]
     X = data_df.drop(columns=['aqi'])
     
@@ -91,17 +91,16 @@ def run_pipeline():
         test_preds = search.best_estimator_.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, test_preds)
         
-        # FIXED: String literal properly terminated
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
         
         if cv_rmse < best_rmse:
             best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
 
-    # 4. Schema creation
+    # 4. Schema
     input_schema = ModelSchema(X_train)
     output_schema = ModelSchema(y_train)
 
-    # 5. UPLOAD WINNER
+    # 5. UPLOAD
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -114,19 +113,18 @@ def run_pipeline():
         metrics={"cv_rmse": best_rmse}, 
         input_schema=input_schema,
         output_schema=output_schema,
-        description=f"Winner: {best_model_name} (Hopsworks 4.0 Compatible)"
+        description=f"Winner: {best_model_name} (Stable REST Mode)"
     )
     karachi_model.save(model_dir)
     print("✅ Model Registry Sync Successful!")
 
-    # 6. FORECAST
+    # 6. & 7. FORECAST & UPLOAD
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. UPLOAD FORECAST
     fg = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
     for col in ['year', 'month', 'day', 'hour']: forecast_df[col] = forecast_df[col].astype('int64')
     fg.insert(forecast_df, write_options={"start_offline_materialization": True, "wait_for_job": False})

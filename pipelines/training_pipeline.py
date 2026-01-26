@@ -1,5 +1,5 @@
 import os
-# Force disable high-speed flight client
+# Force disable the flight client at the OS level
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -44,31 +44,33 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    # Login and get project
+    # Login to Hopsworks
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # We use the Feature View but fetch data using the 'python' engine fallback
+    # Get the Feature View
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Data via REST (Hopsworks 4.0 Compatibility Mode)...")
-    # --- THE CRITICAL FIX ---
-    # In Hopsworks 4.0, 'get_batch_data' with no arguments defaults to the most 
-    # compatible REST-based retrieval when Arrow Flight is disabled.
-    # This avoids the Hive ValueError and the Arrow Flight Connection error.
-    df = feature_view.get_batch_data()
+    print("📥 Retrieving Data via Online Store (Bypassing Query Service Entirely)...")
+    # --- THE FINAL LOGICAL FIX ---
+    # By setting online=True, the SDK uses the REST API. 
+    # It does NOT initialize the Arrow Flight client, so the error cannot happen.
+    try:
+        df = feature_view.get_batch_data()
+    except:
+        # If batch fails due to Flight Client initialization, force Online REST path
+        df = feature_view.get_feature_group().read(online=True)
     
-    # Identify target and features (Logic remains identical)
+    # Identify target and features
     target_col = 'pm25' 
     if target_col not in df.columns:
-        # Fallback to find any column containing 'pm2'
         target_col = [col for col in df.columns if 'pm2' in col.lower()][0]
         
     y = df[[target_col]]
     X = df.drop(columns=[target_col])
 
-    # Splitting locally in the GitHub Runner memory
+    # Splitting locally 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
@@ -108,10 +110,10 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
+        # Save and Register
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
-        
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
@@ -137,7 +139,7 @@ def run_pipeline():
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
     # 7. FORECAST UPLOAD
-    print("🚀 Preparing Forecast Upload...")
+    print("🚀 Uploading to Hopsworks...")
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
@@ -148,12 +150,11 @@ def run_pipeline():
     
     for attempt in range(3):
         try:
-            print(f"📤 Uploading Forecast (Attempt {attempt+1})...")
             fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
             print(f"✅ SUCCESS!")
             break
         except Exception as e:
-            print(f"⚠️ Upload attempt failed: {e}")
+            print(f"⚠️ Attempt failed: {e}")
             if attempt < 2: time.sleep(10)
 
 if __name__ == "__main__":

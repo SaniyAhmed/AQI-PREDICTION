@@ -1,4 +1,7 @@
 import os
+# Force global settings to disable the crash-prone client
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+
 import requests
 import pandas as pd
 import hopsworks
@@ -12,6 +15,13 @@ from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split
+
+# --- THE HOPSWORKS INTERCEPTOR ---
+# This prevents the SDK from even looking for the Arrow Flight service
+import hsfs
+from hsfs.core import arrow_flight_client
+def mock_init(self, *args, **kwargs): return
+arrow_flight_client.ArrowFlightClient.__init__ = mock_init
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -42,36 +52,27 @@ def get_forecast_features(trained_columns):
 
 def run_pipeline():
     api_key = os.getenv('MY_HOPSWORK_KEY')
-    # Login normally for Registry and Feature Group metadata
+    # 1. Login
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 DOWNLOADING DATA VIA DIRECT HTTPS BYPASS...")
-    # Get metadata for IDs
+    print("📥 RETRIEVING DATA VIA SDK (REST API MODE)...")
+    # 2. Get the Feature Group
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
     
-    # CONSTRUCT DIRECT REST API URL
-    # This bypasses the Arrow Flight Client entirely.
-    base_url = "https://c.app.hopsworks.ai/hopsworks-api/api"
-    url = f"{base_url}/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/data?isOnline=false&n=10000"
-    headers = {"Authorization": f"ApiKey {api_key}"}
+    # THE CRITICAL STEP: use_api=True tells Hopsworks to use Port 443 (REST)
+    # instead of Port 443/5005 (Arrow Flight). 
+    # Because of our 'mock_init' above, it cannot crash.
+    full_df = fg.select_all().read(read_options={"use_api": True})
     
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Failed to fetch data via REST: {response.status_code} - {response.text}")
-    
-    # Load JSON response into DataFrame
-    data_items = response.json().get("items", [])
-    full_df = pd.DataFrame(data_items)
-    
-    if full_df.empty:
-        print("❌ CRITICAL ERROR: No data found in Feature Group.")
+    if full_df is None or full_df.empty:
+        print("❌ CRITICAL ERROR: Feature Group is empty or could not be read.")
         return
 
-    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows via REST API.")
+    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows.")
 
-    # --- ML LOGIC ---
+    # --- ML TOURNAMENT ---
     target = 'pm25' if 'pm25' in full_df.columns else full_df.columns[-1]
     X = full_df.drop(columns=[target])
     y = full_df[[target]]
@@ -81,13 +82,13 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # Train Tournament (Simplified for 100% stability)
+    # Fast tournament for GitHub Actions stability
     model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
     model.fit(X_train_scaled, y_train.values.ravel())
     rmse = root_mean_squared_error(y_test, model.predict(X_test_scaled))
     print(f"📊 Model Trained. RMSE: {rmse:.4f}")
 
-    # Save and Register
+    # Save locally and Register
     model_dir = "model_files"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -110,12 +111,12 @@ def run_pipeline():
         'prediction_timestamp': times.dt.strftime('%Y-%m-%d %H:%M:%S')
     })
 
-    # Upload via Feature Group Insert (Usually works as it uses simple POST)
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], 
         online_enabled=True
     )
+    # Insert works via standard HTTP POST
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
     print("✅ PIPELINE COMPLETED SUCCESSFULLY!")
 

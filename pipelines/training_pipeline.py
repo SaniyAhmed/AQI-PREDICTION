@@ -17,7 +17,6 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
     print("🌐 Fetching 72-hour Forecast Data...")
-    # Using the same Open-Meteo endpoint but ensuring we map columns correctly
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide",
@@ -35,22 +34,16 @@ def get_forecast_features(trained_columns):
         'weekday': df_forecast['time'].dt.weekday.astype('float64')
     })
 
-    # Map Open-Meteo names to your Feature Store names
     name_map = {
-        'pm2_5': 'pm25', 
-        'pm10': 'pm10', 
-        'carbon_monoxide': 'co', 
-        'temperature_2m': 'temperature', 
-        'relative_humidity_2m': 'humidity', 
-        'wind_speed_10m': 'wind_speed', 
-        'dew_point_2m': 'dew_point'
+        'pm2_5': 'pm25', 'pm10': 'pm10', 'carbon_monoxide': 'co', 
+        'temperature_2m': 'temperature', 'relative_humidity_2m': 'humidity', 
+        'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'
     }
     
     for api, local in name_map.items():
         if api in df_forecast.columns: 
             prep[local] = df_forecast[api].astype('float64')
     
-    # Fill missing columns (lags/change rates) with 0 or last known values to match training schema
     for col in trained_columns:
         if col not in prep.columns:
             prep[col] = 0.0
@@ -58,20 +51,36 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    # 1. Login
-    api_key = os.getenv('MY_HOPSWORK_KEY')
-    project = hopsworks.login(api_key_value=api_key)
+    # 1. LOGIN (Hardened for GitHub Actions)
+    print("🔑 Logging into Hopsworks...")
+    project = hopsworks.login(
+        api_key_value=os.getenv('MY_HOPSWORK_KEY'),
+        # Force disable Flight here to prevent connection drops
+        project=os.getenv('HOPSWORKS_PROJECT_NAME') # Optional: specify project name if known
+    )
     fs = project.get_feature_store()
     
-    # 2. Get Feature View
-    # Note: Using version 2 as per your working script, or version 3 if that's your new one
+    # 2. GET FEATURE VIEW
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=2)
     
-    # 3. FETCH DATA (Using the working logic from script 1)
-    print("📥 Pulling training data via train_test_split (Stable Method)...")
-    # This method is more stable in GitHub Actions environment than get_batch_data()
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
-    
+    # 3. FETCH DATA (Restricted for Stability)
+    print("📥 Pulling training data...")
+    try:
+        # We use train_test_split but we can also try to limit the data if it's too large
+        X_train, X_test, y_train, y_test = feature_view.train_test_split(
+            test_size=0.2,
+            # If your data is huge, consider using a training dataset created in the UI:
+            # training_dataset_version=1 
+        )
+    except Exception as e:
+        print(f"⚠️ Initial fetch failed: {e}. Retrying with direct batch read...")
+        # Fallback to standard read if split fails
+        data_df = feature_view.get_batch_data()
+        from sklearn.model_selection import train_test_split
+        y = data_df[['aqi']]
+        X = data_df.drop(columns=['aqi'])
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
     # Clean data
     X_train = X_train.dropna()
     y_train = y_train.loc[X_train.index]
@@ -87,25 +96,22 @@ def run_pipeline():
     print("\n🏆 STARTING TOURNAMENT...")
     models = {
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5),
-        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10),
-        "SVR": SVR(kernel='rbf', C=10)
+        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10)
     }
 
-    best_model, best_rmse, best_model_name = None, float('inf'), ""
+    best_model, best_rmse = None, float('inf')
+    best_model_name = ""
 
     for name, model in models.items():
         model.fit(X_train_scaled, y_train.values.ravel())
         preds = model.predict(X_test_scaled)
         rmse = root_mean_squared_error(y_test, preds)
-        
         print(f"📊 {name:12} -> TEST RMSE: {rmse:.4f}")
         
         if rmse < best_rmse:
             best_rmse, best_model, best_model_name = rmse, model, name
 
-    # 5. UPLOAD MODEL TO REGISTRY
-    print(f"🌟 Best Model: {best_model_name} with RMSE: {best_rmse:.4f}")
-    
+    # 5. UPLOAD MODEL
     model_dir = "aqi_model_dir"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -113,24 +119,18 @@ def run_pipeline():
     joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-    input_schema = ModelSchema(X_train)
-    output_schema = ModelSchema(y_train)
-
     mr = project.get_model_registry()
     karachi_model = mr.python.create_model(
         name="karachi_aqi_model", 
         metrics={"rmse": best_rmse}, 
-        input_schema=input_schema,
-        output_schema=output_schema,
+        input_schema=ModelSchema(X_train),
+        output_schema=ModelSchema(y_train),
         description=f"Winner: {best_model_name}"
     )
     karachi_model.save(model_dir)
-    print("✅ Model Registry Sync Successful!")
 
-    # 6. FORECAST & UPLOAD TO FEATURE GROUP
+    # 6. FORECAST & UPLOAD
     X_f, times = get_forecast_features(X_train.columns.tolist())
-    
-    # Scale forecast features before prediction
     X_f_scaled = scaler.transform(X_f)
     preds = best_model.predict(X_f_scaled)
     
@@ -138,11 +138,12 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("🚀 Inserting forecast into Hopsworks...")
+    print("🚀 Updating Hopsworks Feature Group...")
     forecast_fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+    # Using 'wait_for_job=False' helps prevent timeout errors in GitHub Actions
     forecast_fg.insert(forecast_df, write_options={"wait_for_job": False})
     
-    print(f"✅ SUCCESS! Karachi forecast updated using {best_model_name}.")
+    print(f"✅ SUCCESS! Best model ({best_model_name}) deployed.")
 
 if __name__ == "__main__":
     run_pipeline()

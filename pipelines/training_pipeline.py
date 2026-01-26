@@ -1,7 +1,4 @@
 import os
-# Force disable high-speed flight client to prevent the crash in GitHub Actions
-os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
-
 import requests
 import pandas as pd
 import hopsworks
@@ -21,119 +18,88 @@ KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
-    """Fetch 72-hour forecast from Open-Meteo API"""
     print("🌐 Fetching 72-hour forecast...")
     params = {
-        "latitude": KARACHI_LAT, 
-        "longitude": KARACHI_LON,
-        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
+        "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
+        "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
         "forecast_days": 3
     }
-    res = requests.get(FORECAST_URL, params=params, timeout=30).json()
+    res = requests.get(FORECAST_URL, params=params).json()
     df = pd.DataFrame(res["hourly"])
     df['time'] = pd.to_datetime(df['time'])
-    
     prep = pd.DataFrame({
         'year': df['time'].dt.year.astype('int64'), 
         'month': df['time'].dt.month.astype('int64'),
         'day': df['time'].dt.day.astype('int64'), 
         'hour': df['time'].dt.hour.astype('int64')
     })
-    
-    name_map = {
-        'pm2_5': 'pm25', 'pm10': 'pm10', 'carbon_monoxide': 'co',
-        'nitrogen_dioxide': 'no2', 'sulphur_dioxide': 'so2', 'ozone': 'o3',
-        'temperature_2m': 'temperature', 'relative_humidity_2m': 'humidity',
-        'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'
-    }
-    
+    name_map = {'pm2_5': 'pm25', 'pm10': 'pm10', 'carbon_monoxide': 'co', 'nitrogen_dioxide': 'no2', 'sulphur_dioxide': 'so2', 'ozone': 'o3', 'temperature_2m': 'temperature', 'relative_humidity_2m': 'humidity', 'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'}
     for api_name, local_name in name_map.items():
-        if api_name in df.columns:
-            prep[local_name] = df[api_name].astype('float64')
-    
+        if api_name in df.columns: prep[local_name] = df[api_name].astype('float64')
     for col in trained_columns:
-        if col not in prep.columns:
-            prep[col] = 0.0
-    
+        if col not in prep.columns: prep[col] = 0.0
     return prep[trained_columns], df['time']
 
 def run_pipeline():
-    print("=" * 70)
-    print("🚀 KARACHI AQI TRAINING PIPELINE (REST API VERSION)")
-    print("=" * 70)
-    
-    # 1. Login to Hopsworks
-    project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
+    api_key = os.getenv('MY_HOPSWORK_KEY')
+    # Login normally for Registry and Feature Group metadata
+    project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
-    print("✅ Connected to Hopsworks!")
     
-    # 2. READ DATA USING THE REST API ENGINE (The Fix)
-    print("📥 Downloading data via REST API (Port 443)...")
+    print("📥 DOWNLOADING DATA VIA DIRECT HTTPS BYPASS...")
+    # Get metadata for IDs
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
     
-    # We use .read(read_options={"use_api": True}) which is the official
-    # way to bypass the Arrow Flight Query Service in restricted environments.
-    full_df = fg.select_all().read(read_options={"use_api": True})
+    # CONSTRUCT DIRECT REST API URL
+    # This bypasses the Arrow Flight Client entirely.
+    base_url = "https://c.app.hopsworks.ai/hopsworks-api/api"
+    url = f"{base_url}/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/data?isOnline=false&n=10000"
+    headers = {"Authorization": f"ApiKey {api_key}"}
     
-    # SAFETY SHIELD: Stop if data is empty to avoid the "n_samples=0" crash
-    if full_df is None or full_df.empty:
-        print("❌ CRITICAL ERROR: Feature Group returned 0 rows.")
-        print("Ensure 'karachi_aqi' has data in the Hopsworks UI before running.")
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"Failed to fetch data via REST: {response.status_code} - {response.text}")
+    
+    # Load JSON response into DataFrame
+    data_items = response.json().get("items", [])
+    full_df = pd.DataFrame(data_items)
+    
+    if full_df.empty:
+        print("❌ CRITICAL ERROR: No data found in Feature Group.")
         return
 
-    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows.")
+    print(f"✅ SUCCESS! Retrieved {len(full_df)} rows via REST API.")
 
-    # 3. PREPARE TARGET
-    # Look for pm25 or aqi as target
-    target = 'aqi' if 'aqi' in full_df.columns else 'pm25'
-    print(f"🎯 Target identified: {target}")
-
+    # --- ML LOGIC ---
+    target = 'pm25' if 'pm25' in full_df.columns else full_df.columns[-1]
     X = full_df.drop(columns=[target])
     y = full_df[[target]]
     
-    # 4. SPLIT AND SCALE
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    # 5. TRAINING TOURNAMENT
-    models = {
-        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42),
-        "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42),
-        "SVR": SVR(kernel='rbf', C=10)
-    }
+    # Train Tournament (Simplified for 100% stability)
+    model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+    model.fit(X_train_scaled, y_train.values.ravel())
+    rmse = root_mean_squared_error(y_test, model.predict(X_test_scaled))
+    print(f"📊 Model Trained. RMSE: {rmse:.4f}")
+
+    # Save and Register
+    model_dir = "model_files"
+    if os.path.exists(model_dir): shutil.rmtree(model_dir)
+    os.makedirs(model_dir)
+    joblib.dump(model, f"{model_dir}/karachi_aqi_model.pkl")
+    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
     
-    best_model, best_rmse, best_name = None, float('inf'), ""
-    
-    for name, model in models.items():
-        print(f"🔄 Training {name}...")
-        model.fit(X_train_scaled, y_train.values.ravel())
-        preds = model.predict(X_test_scaled)
-        rmse = root_mean_squared_error(y_test, preds)
-        print(f"   ✅ {name} RMSE: {rmse:.4f}")
-        
-        # Save locally
-        model_dir = f"model_{name.lower()}"
-        if os.path.exists(model_dir): shutil.rmtree(model_dir)
-        os.makedirs(model_dir)
-        joblib.dump(model, f"{model_dir}/karachi_aqi_model.pkl")
-        joblib.dump(scaler, f"{model_dir}/scaler.pkl")
-        
-        # Register to Registry
-        hops_model = mr.python.create_model(name="karachi_aqi_model", metrics={"rmse": rmse})
-        hops_model.save(model_dir)
+    h_model = mr.python.create_model(name="karachi_aqi_model", metrics={"rmse": rmse})
+    h_model.save(model_dir)
 
-        if rmse < best_rmse:
-            best_rmse, best_model, best_name = rmse, model, name
-
-    print(f"🏆 WINNER: {best_name} (RMSE: {best_rmse:.4f})")
-
-    # 6. FORECAST
+    # --- FORECAST & UPLOAD ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
-    predictions = best_model.predict(scaler.transform(X_f))
+    predictions = model.predict(scaler.transform(X_f))
     
     forecast_df = pd.DataFrame({
         'year': X_f['year'].astype('int64'),
@@ -144,7 +110,7 @@ def run_pipeline():
         'prediction_timestamp': times.dt.strftime('%Y-%m-%d %H:%M:%S')
     })
 
-    # 7. UPLOAD
+    # Upload via Feature Group Insert (Usually works as it uses simple POST)
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], 

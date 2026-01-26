@@ -51,13 +51,12 @@ def run_pipeline():
     # 2. Get Feature View
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Training Data using REST-based Query Service...")
-    # FIX: Use read() instead of SQL strings. 
-    # This automatically uses the REST engine compatible with 4.0+
-    data_df = feature_view.read() 
+    print("📥 Retrieving Training Data using get_batch_data()...")
+    # FIX: Use get_batch_data() which is the correct method for FeatureView
+    data_df = feature_view.get_batch_data() 
     
     # Pre-process: Separate features (X) and label (y)
-    # Assuming 'aqi' is your target column
+    # Ensure 'aqi' matches your target column name exactly
     y = data_df[['aqi']]
     X = data_df.drop(columns=['aqi'])
     
@@ -91,44 +90,4 @@ def run_pipeline():
         cv_rmse = -search.best_score_
         test_preds = search.best_estimator_.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, test_preds)
-        print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
-        if cv_rmse < best_rmse:
-            best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
-
-    # 4. Schema creation
-    input_schema = ModelSchema(X_train)
-    output_schema = ModelSchema(y_train)
-
-    # 5. UPLOAD WINNER
-    model_dir = "aqi_model_dir"
-    if os.path.exists(model_dir): shutil.rmtree(model_dir)
-    os.makedirs(model_dir)
-    joblib.dump(best_model, f"{model_dir}/karachi_aqi_model.pkl", compress=3)
-    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
-
-    mr = project.get_model_registry()
-    karachi_model = mr.python.create_model(
-        name="karachi_aqi_model", 
-        metrics={"cv_rmse": best_rmse}, 
-        input_schema=input_schema,
-        output_schema=output_schema,
-        description=f"Winner: {best_model_name} (Hopsworks 4.0 Compatible)"
-    )
-    karachi_model.save(model_dir)
-    print("✅ Model Registry Sync Successful!")
-
-    # 6. FORECAST
-    X_f, times = get_forecast_features(X_train.columns.tolist())
-    preds = best_model.predict(scaler.transform(X_f))
-    forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
-    forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
-    forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # 7. UPLOAD FORECAST
-    fg = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
-    for col in ['year', 'month', 'day', 'hour']: forecast_df[col] = forecast_df[col].astype('int64')
-    fg.insert(forecast_df, write_options={"start_offline_materialization": True, "wait_for_job": False})
-    print(f"🚀 SUCCESS! Karachi forecast is live.")
-
-if __name__ == "__main__":
-    run_pipeline()
+        print(f"   📊 {name:12} -> CV RMSE

@@ -2,8 +2,8 @@ name: Daily_Model_Training
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Daily at midnight UTC
-  workflow_dispatch:      # Manual trigger button
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   train_and_predict:
@@ -34,14 +34,7 @@ jobs:
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
           HSFS_DISABLE_FLIGHT_CLIENT: "True"
+          ARROW_FLIGHT_ENABLED: "False"
+          HOPSWORKS_DISABLE_ARROW: "True"
         run: |
           python pipelines/training_pipeline.py
-
-      - name: Upload Logs (if failed)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-logs
-          path: |
-            *.log
-            **/*.log

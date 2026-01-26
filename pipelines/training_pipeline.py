@@ -42,36 +42,42 @@ def get_forecast_features(trained_columns):
 
 def run_pipeline():
     api_key = os.getenv('MY_HOPSWORK_KEY')
-    # Connect to Hopsworks for Registry/Metadata only
+    # Login to Hopsworks
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 Retrieving Data via Direct REST API (The Ultimate Bypass)...")
-    # --- THE NUCLEAR FIX ---
-    # We bypass the SDK's broken data engine entirely.
-    # We use a direct HTTP request to the Hopsworks Online/Preview API.
-    # This acts like a standard website request; port 443 only.
+    print("📥 Retrieving Data via Direct REST API Bypass...")
+    # Get the FG object to get the ID, but do NOT use its .read() or .show() methods
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
     
-    # We use the internal REST client already logged into the SDK
-    # but we call the 'preview' endpoint directly to avoid Arrow Flight initialization.
-    method = "GET"
-    url = f"{fg._feature_store_engine._client._base_url}/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/data?isOnline=false&n=10000"
-    headers = {"Authorization": f"ApiKey {api_key}", "Content-Type": "application/json"}
+    # Building the URL manually using public properties
+    # This bypasses the Arrow Flight engine entirely
+    base_url = "https://c.app.hopsworks.ai/hopsworks-api/api"
+    project_id = project.id
+    fs_id = fs.id
+    fg_id = fg.id
     
-    response = requests.request(method, url, headers=headers)
+    url = f"{base_url}/project/{project_id}/featurestores/{fs_id}/featuregroups/{fg_id}/data?isOnline=false&n=10000"
+    headers = {
+        "Authorization": f"ApiKey {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    response = requests.get(url, headers=headers)
     if response.status_code != 200:
-        raise Exception(f"Failed to fetch data: {response.text}")
+        raise Exception(f"REST API Error {response.status_code}: {response.text}")
     
-    # Convert JSON response to DataFrame
     data = response.json()
+    # 'items' contains the list of feature data
     df = pd.DataFrame(data['items'])
     
     if df.empty:
-        raise ValueError("Data retrieved is empty. Ensure Feature Group 'karachi_aqi' has data.")
+        raise ValueError("Data retrieved is empty. Ensure Feature Group 'karachi_aqi' has data in Hopsworks.")
 
-    # --- REST OF THE LOGIC (Untouched) ---
+    print(f"✅ Successfully retrieved {len(df)} rows via REST API.")
+
+    # --- TOURNAMENT LOGIC ---
     target_col = 'pm25' 
     y = df[[target_col]]
     X = df.drop(columns=[target_col])
@@ -84,7 +90,6 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # 🏆 TOURNAMENT SETUP
     param_grids = {
         "RandomForest": {"n_estimators": [50, 100], "max_depth": [10, 20], "min_samples_split": [2, 5]},
         "XGBoost": {"n_estimators": [50, 100], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},
@@ -97,6 +102,8 @@ def run_pipeline():
     }
 
     print("\n🏆 STARTING TOURNAMENT...")
+    best_model, best_rmse, best_model_name = None, float('inf'), ""
+
     for name, model in base_models.items():
         print(f"🔍 Tuning {name}...")
         search = RandomizedSearchCV(model, param_grids[name], n_iter=3, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
@@ -105,13 +112,15 @@ def run_pipeline():
         test_preds = search.best_estimator_.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, test_preds)
         
+        print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
+
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
-        current_model = mr.python.create_model(name="karachi_aqi_model", metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse})
+        current_model = mr.python.create_model(name="karachi_aqi_model", metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, description=f"Winner: {name}")
         current_model.save(iter_model_dir)
 
         if cv_rmse < best_rmse:
@@ -130,7 +139,6 @@ def run_pipeline():
     fg_forecast = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
     for col in ['year', 'month', 'day', 'hour']: forecast_df[col] = forecast_df[col].astype('int64')
     
-    # Uploading back works fine because it uses a simple POST request
     fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
     print(f"✅ SUCCESS! Results sent to Hopsworks.")
 

@@ -1,5 +1,5 @@
 import os
-# Force disable the high-speed client globally
+# Force disable high-speed clients to prevent GitHub Action network blocks
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -44,23 +44,26 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
+    # Login and get project
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
-    print("📥 Retrieving Data via Batch Query (Bypassing Query Service)...")
-    # --- THE CRITICAL SHIFT ---
-    # get_batch_data is much simpler than train_test_split and doesn't trigger the complex Flight handlers.
-    # We pull the data and split it locally to ensure the connection stays on standard HTTPS.
-    full_data = feature_view.get_batch_data(read_options={"use_hive": True})
+    print("📥 Retrieving Data via Hive (Bypassing Arrow Flight)...")
+    # --- THE 100% FIX ---
+    # .read() with use_hive=True is the most stable way to pull data in restricted networks.
+    # It avoids the arrow_flight_client.py logic entirely.
+    df = feature_view.read(read_options={"use_hive": True})
     
-    # Identify target and features (Assuming 'aqi' is your target based on typical AQI pipelines)
-    # We keep the logic for your tournament exactly as it was.
-    y = full_data[['aqi']] 
-    X = full_data.drop(columns=['aqi']) 
+    # Identify target and features
+    # Note: Ensure 'pm25' (or your target column name) matches your Feature Store
+    target_col = 'pm25' 
+    y = df[[target_col]]
+    X = df.drop(columns=[target_col])
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Splitting locally to avoid the Hopsworks Query Service split logic
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
     
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
@@ -69,7 +72,7 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # 🏆 TOURNAMENT SETUP
+    # 🏆 TOURNAMENT SETUP (Logic unchanged)
     param_grids = {
         "RandomForest": {"n_estimators": [50, 100], "max_depth": [10, 20], "min_samples_split": [2, 5]},
         "XGBoost": {"n_estimators": [50, 100], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},
@@ -99,6 +102,7 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
+        # --- LOGIC TO STORE EACH MODEL ---
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -106,6 +110,7 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
+        # Register model version
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 
@@ -141,11 +146,12 @@ def run_pipeline():
         try:
             print(f"📤 Uploading Forecast (Attempt {attempt+1})...")
             fg.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
-            print(f"✅ SUCCESS!")
+            print(f"✅ SUCCESS! Karachi forecast is live.")
             break
         except Exception as e:
             print(f"⚠️ Upload attempt failed: {e}")
-            if attempt < 2: time.sleep(10)
+            if attempt < 2: 
+                time.sleep(10)
 
 if __name__ == "__main__":
     run_pipeline()

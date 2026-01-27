@@ -1,5 +1,5 @@
 import os
-# Keeping this to ensure stability on the free tier
+# Disable the broken Flight Client/Query Service
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -7,14 +7,13 @@ import pandas as pd
 import hopsworks
 import joblib
 import shutil
-import time
 import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.model_selection import train_test_split
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -59,26 +58,25 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # --- 1. GET DATA FROM VERSION 4 ---
+    # --- 1. BYPASS READ (STRICT PANDAS MODE) ---
     print("📥 Accessing Feature Group Version 4...")
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
     
-    # We use the feature view to create the training data
-    # If the view doesn't exist for V4, we create it
+    # We bypass the Feature View and Query Service entirely to avoid 'Binder Error'
+    print("🚀 Fetching data via engine bypass...")
     try:
-        feature_view = fs.get_feature_view(name="karachi_aqi_view", version=4)
-    except:
-        print("🏗️ Creating Feature View Version 4...")
-        feature_view = fs.create_feature_view(
-            name="karachi_aqi_view",
-            version=4,
-            query=fg.select_all(),
-            labels=["aqi"]
-        )
+        # This is the most robust way to read data when the SQL engine is broken
+        data = fg.select_all().read(read_options={"use_apache_spark_python_sdk": False})
+    except Exception as e:
+        print(f"⚠️ Primary bypass failed: {e}. Trying fallback...")
+        # Local engine read
+        data = fg.read()
 
-    # Read data (bypassing the server-side split to avoid query service timeouts)
-    data = feature_view.read()
-    
+    if data is None or data.empty:
+        raise Exception("❌ Data retrieval failed. Ensure the Materialization Job in Hopsworks UI is 'FINISHED'.")
+
+    print(f"✅ Data loaded: {len(data)} rows.")
+
     y = data[['aqi']]
     X = data.drop(columns=['aqi'])
     
@@ -90,33 +88,25 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # --- 2. TOURNAMENT LOGIC (RF, XGB, SVR) ---
-    # Simplified grids for a stable first run; you can expand these later
-    param_grids = {
-        "RandomForest": {"n_estimators": [100], "max_depth": [10]},
-        "XGBoost": {"n_estimators": [100], "learning_rate": [0.1]},
-        "SVR": {"C": [1.0], "epsilon": [0.1]}
-    }
+    # --- 2. TOURNAMENT LOGIC ---
     base_models = {
-        "RandomForest": RandomForestRegressor(random_state=42),
-        "XGBoost": XGBRegressor(random_state=42),
-        "SVR": SVR(kernel='rbf')
+        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42),
+        "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42),
+        "SVR": SVR(kernel='rbf', C=1.0)
     }
 
-    print("\n🏆 STARTING TOURNAMENT (All models will be saved to registry)...")
-    print("-" * 50)
+    print("\n🏆 STARTING TOURNAMENT...")
     best_model, best_rmse, best_model_name = None, float('inf'), ""
 
     for name, model in base_models.items():
         print(f"🔍 Training {name}...")
-        # Fitting with simple search to ensure completion
         model.fit(X_train_scaled, y_train.values.ravel())
         
         preds = model.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, preds)
         print(f"    📊 {name:12} -> RMSE: {test_rmse:.4f}")
 
-        # --- REGISTRY LOGIC ---
+        # Save & Register
         model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(model_dir): shutil.rmtree(model_dir)
         os.makedirs(model_dir)
@@ -124,7 +114,6 @@ def run_pipeline():
         joblib.dump(model, f"{model_dir}/karachi_aqi_model.pkl")
         joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-        # Log each model to the registry
         current_model = mr.python.create_model(
             name=f"karachi_aqi_{name.lower()}", 
             metrics={"rmse": float(test_rmse)}, 
@@ -132,14 +121,12 @@ def run_pipeline():
         )
         current_model.save(model_dir)
 
-        # Winner Selection
         if test_rmse < best_rmse:
             best_rmse, best_model, best_model_name = test_rmse, model, name
 
-    print("-" * 50)
     print(f"⭐ TOURNAMENT WINNER: {best_model_name} (RMSE: {best_rmse:.4f})")
 
-    # --- 3. FORECAST GENERATION (Using Winner) ---
+    # --- 3. FORECAST ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     
@@ -153,13 +140,12 @@ def run_pipeline():
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
     
-    # Ensure types match the Feature Group schema exactly
     for col in ['year', 'month', 'day', 'hour']: 
         forecast_df[col] = forecast_df[col].astype('int64')
     
     print(f"📤 Uploading Forecast from winner {best_model_name}...")
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
-    print(f"✅ Pipeline Successfully Finished!")
+    print(f"✅ Pipeline Completed Successfully!")
 
 if __name__ == "__main__":
     run_pipeline()

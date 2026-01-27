@@ -12,7 +12,6 @@ from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 
@@ -22,6 +21,7 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
     print("🌐 Fetching 72-hour Forecast Data...")
+    trained_columns = [str(col) for col in trained_columns]  # ✅ Ensure plain strings
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
@@ -36,7 +36,12 @@ def get_forecast_features(trained_columns):
         'day': df_forecast['time'].dt.day.astype('int64'), 
         'hour': df_forecast['time'].dt.hour.astype('int64')
     })
-    name_map = {'pm2_5': 'pm25', 'pm10': 'pm10', 'carbon_monoxide': 'co', 'nitrogen_dioxide': 'no2', 'sulphur_dioxide': 'so2', 'ozone': 'o3', 'temperature_2m': 'temperature', 'relative_humidity_2m': 'humidity', 'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'}
+    name_map = {
+        'pm2_5': 'pm25', 'pm10': 'pm10', 'carbon_monoxide': 'co', 
+        'nitrogen_dioxide': 'no2', 'sulphur_dioxide': 'so2', 'ozone': 'o3', 
+        'temperature_2m': 'temperature', 'relative_humidity_2m': 'humidity', 
+        'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'
+    }
     for api, local in name_map.items():
         if api in df_forecast.columns: prep[local] = df_forecast[api].astype('float64')
     for col in trained_columns:
@@ -44,15 +49,18 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    # --- LOGIN USING GITHUB ACTIONS SECRET ---
-    api_key = os.getenv('MY_HOPSWORK_KEY')
-    project = hopsworks.login(api_key_value=api_key)
+    project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
     
     print("📥 Retrieving Training Data...")
     X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
+
+    # ✅ Convert all columns to plain strings to prevent BinderError
+    X_train.columns = [str(col) for col in X_train.columns]
+    X_test.columns = [str(col) for col in X_test.columns]
+
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 

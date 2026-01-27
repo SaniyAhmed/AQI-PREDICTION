@@ -4,13 +4,14 @@ import pandas as pd
 import hopsworks
 import joblib
 import shutil
+import time
 import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -57,13 +58,7 @@ def run_pipeline():
     
     # --- 1. THE ULTIMATE BYPASS: DOWNLOAD RAW PARQUET ---
     print("📥 Bypassing ALL Feature Store Services... Downloading raw data files.")
-    
-    # Path logic: On Hopsworks, data is stored in:
-    # /Projects/[ProjectName]/Resources/FeatureStore/[FSName]/[FGName]_[Version]/
-    # We will grab the Offline Training Data directly.
     dataset_api = project.get_dataset_api()
-    
-    # This path is standard for Hopsworks Offline Storage
     remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_4"
     local_dir = "./raw_data"
     
@@ -72,10 +67,7 @@ def run_pipeline():
 
     print(f"📂 Searching for data in: {remote_path}")
     try:
-        # Download the directory containing the parquet files
         dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
-        
-        # Find the .parquet file (Hudi/Spark usually names it with a UUID)
         parquet_files = []
         for root, dirs, files in os.walk(local_dir):
             for file in files:
@@ -89,18 +81,16 @@ def run_pipeline():
         data_list = [pd.read_parquet(f) for f in parquet_files]
         data = pd.concat(data_list, ignore_index=True)
         
-        # Clean up Hudi/System columns if they exist
         system_cols = ['_hoodie_commit_time', '_hoodie_commit_seqno', '_hoodie_record_key', '_hoodie_partition_path', '_hoodie_file_name']
         data = data.drop(columns=[c for c in system_cols if c in data.columns])
 
     except Exception as e:
         print(f"❌ Direct download failed: {e}")
-        print("💡 Suggestion: Go to Hopsworks UI -> Data Sets -> Resources and verify 'karachi_aqi_4' exists.")
         return
 
     print(f"✅ Data loaded: {len(data)} rows.")
 
-    # --- 2. PREP & TOURNAMENT ---
+    # --- 2. PREP ---
     y = data[['aqi']]
     X = data.drop(columns=['aqi'])
     
@@ -109,39 +99,58 @@ def run_pipeline():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
+    # --- 3. TOURNAMENT WITH TUNING ---
+    param_grids = {
+        "RandomForest": {"n_estimators": [50, 100], "max_depth": [10, 20], "min_samples_split": [2, 5]},
+        "XGBoost": {"n_estimators": [50, 100], "learning_rate": [0.05, 0.1], "max_depth": [3, 5]},
+        "SVR": {"C": [1, 10], "epsilon": [0.1]}
+    }
     base_models = {
-        "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42),
-        "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42),
-        "SVR": SVR(kernel='rbf', C=1.0)
+        "RandomForest": RandomForestRegressor(random_state=42),
+        "XGBoost": XGBRegressor(random_state=42),
+        "SVR": SVR(kernel='rbf')
     }
 
-    print("\n🏆 STARTING TOURNAMENT...")
+    print("\n🏆 STARTING TOURNAMENT (All models will be registered)...")
+    print("-" * 50)
     best_model, best_rmse, best_model_name = None, float('inf'), ""
 
     for name, model in base_models.items():
-        print(f"🔍 Training {name}...")
-        model.fit(X_train_scaled, y_train.values.ravel())
-        preds = model.predict(X_test_scaled)
-        test_rmse = root_mean_squared_error(y_test, preds)
-        print(f"    📊 {name:12} -> RMSE: {test_rmse:.4f}")
+        print(f"🔍 Tuning {name}...")
+        search = RandomizedSearchCV(
+            model, param_grids[name], n_iter=3, cv=3, 
+            scoring='neg_root_mean_squared_error', n_jobs=-1
+        )
+        search.fit(X_train_scaled, y_train.values.ravel())
+        cv_rmse = -search.best_score_
+        
+        test_preds = search.best_estimator_.predict(X_test_scaled)
+        test_rmse = root_mean_squared_error(y_test, test_preds)
+        
+        print(f"    📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        model_dir = f"model_dir_{name.lower()}"
-        if os.path.exists(model_dir): shutil.rmtree(model_dir)
-        os.makedirs(model_dir)
-        joblib.dump(model, f"{model_dir}/karachi_aqi_model.pkl")
-        joblib.dump(scaler, f"{model_dir}/scaler.pkl")
+        # --- LOGIC TO STORE EACH MODEL ---
+        iter_model_dir = f"model_dir_{name.lower()}"
+        if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
+        os.makedirs(iter_model_dir)
+        
+        joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
+        joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
         current_model = mr.python.create_model(
             name=f"karachi_aqi_{name.lower()}", 
-            metrics={"rmse": float(test_rmse)}, 
-            description=f"Direct Download Training"
+            metrics={"cv_rmse": float(cv_rmse), "test_rmse": float(test_rmse)}, 
+            description=f"Direct Download Training: {name}"
         )
-        current_model.save(model_dir)
+        current_model.save(iter_model_dir)
 
-        if test_rmse < best_rmse:
-            best_rmse, best_model, best_model_name = test_rmse, model, name
+        if cv_rmse < best_rmse:
+            best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
 
-    # --- 3. FORECAST & UPLOAD ---
+    print("-" * 50)
+    print(f"⭐ TOURNAMENT WINNER: {best_model_name} (CV RMSE: {best_rmse:.4f})")
+
+    # --- 4. FORECAST & UPLOAD ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()

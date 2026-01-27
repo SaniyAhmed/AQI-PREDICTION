@@ -1,7 +1,4 @@
 import os
-# Disable the broken Flight Client/Query Service
-os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
-
 import requests
 import pandas as pd
 import hopsworks
@@ -58,37 +55,60 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # --- 1. BYPASS READ (STRICT PANDAS MODE) ---
-    print("📥 Accessing Feature Group Version 4...")
-    fg = fs.get_feature_group(name="karachi_aqi", version=4)
+    # --- 1. THE ULTIMATE BYPASS: DOWNLOAD RAW PARQUET ---
+    print("📥 Bypassing ALL Feature Store Services... Downloading raw data files.")
     
-    # We bypass the Feature View and Query Service entirely to avoid 'Binder Error'
-    print("🚀 Fetching data via engine bypass...")
-    try:
-        # This is the most robust way to read data when the SQL engine is broken
-        data = fg.select_all().read(read_options={"use_apache_spark_python_sdk": False})
-    except Exception as e:
-        print(f"⚠️ Primary bypass failed: {e}. Trying fallback...")
-        # Local engine read
-        data = fg.read()
+    # Path logic: On Hopsworks, data is stored in:
+    # /Projects/[ProjectName]/Resources/FeatureStore/[FSName]/[FGName]_[Version]/
+    # We will grab the Offline Training Data directly.
+    dataset_api = project.get_dataset_api()
+    
+    # This path is standard for Hopsworks Offline Storage
+    remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_4"
+    local_dir = "./raw_data"
+    
+    if os.path.exists(local_dir): shutil.rmtree(local_dir)
+    os.makedirs(local_dir)
 
-    if data is None or data.empty:
-        raise Exception("❌ Data retrieval failed. Ensure the Materialization Job in Hopsworks UI is 'FINISHED'.")
+    print(f"📂 Searching for data in: {remote_path}")
+    try:
+        # Download the directory containing the parquet files
+        dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
+        
+        # Find the .parquet file (Hudi/Spark usually names it with a UUID)
+        parquet_files = []
+        for root, dirs, files in os.walk(local_dir):
+            for file in files:
+                if file.endswith(".parquet"):
+                    parquet_files.append(os.path.join(root, file))
+        
+        if not parquet_files:
+            raise Exception("No Parquet files found in the downloaded directory.")
+            
+        print(f"📄 Found {len(parquet_files)} data files. Loading into Pandas...")
+        data_list = [pd.read_parquet(f) for f in parquet_files]
+        data = pd.concat(data_list, ignore_index=True)
+        
+        # Clean up Hudi/System columns if they exist
+        system_cols = ['_hoodie_commit_time', '_hoodie_commit_seqno', '_hoodie_record_key', '_hoodie_partition_path', '_hoodie_file_name']
+        data = data.drop(columns=[c for c in system_cols if c in data.columns])
+
+    except Exception as e:
+        print(f"❌ Direct download failed: {e}")
+        print("💡 Suggestion: Go to Hopsworks UI -> Data Sets -> Resources and verify 'karachi_aqi_4' exists.")
+        return
 
     print(f"✅ Data loaded: {len(data)} rows.")
 
+    # --- 2. PREP & TOURNAMENT ---
     y = data[['aqi']]
     X = data.drop(columns=['aqi'])
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
-    X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
-
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # --- 2. TOURNAMENT LOGIC ---
     base_models = {
         "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42),
         "XGBoost": XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42),
@@ -101,51 +121,39 @@ def run_pipeline():
     for name, model in base_models.items():
         print(f"🔍 Training {name}...")
         model.fit(X_train_scaled, y_train.values.ravel())
-        
         preds = model.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, preds)
         print(f"    📊 {name:12} -> RMSE: {test_rmse:.4f}")
 
-        # Save & Register
         model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(model_dir): shutil.rmtree(model_dir)
         os.makedirs(model_dir)
-        
         joblib.dump(model, f"{model_dir}/karachi_aqi_model.pkl")
         joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
         current_model = mr.python.create_model(
             name=f"karachi_aqi_{name.lower()}", 
             metrics={"rmse": float(test_rmse)}, 
-            description=f"Tournament Participant: {name}"
+            description=f"Direct Download Training"
         )
         current_model.save(model_dir)
 
         if test_rmse < best_rmse:
             best_rmse, best_model, best_model_name = test_rmse, model, name
 
-    print(f"⭐ TOURNAMENT WINNER: {best_model_name} (RMSE: {best_rmse:.4f})")
-
-    # --- 3. FORECAST ---
+    # --- 3. FORECAST & UPLOAD ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
-    
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # --- 4. UPLOAD FORECAST ---
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
-    
-    for col in ['year', 'month', 'day', 'hour']: 
-        forecast_df[col] = forecast_df[col].astype('int64')
-    
-    print(f"📤 Uploading Forecast from winner {best_model_name}...")
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
-    print(f"✅ Pipeline Completed Successfully!")
+    print(f"✅ Pipeline Completed via Dataset API Bypass!")
 
 if __name__ == "__main__":
     run_pipeline()

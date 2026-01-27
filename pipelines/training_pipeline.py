@@ -1,4 +1,5 @@
 import os
+# Force disable the Arrow Flight client to use the REST API (more stable for small/medium datasets)
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -12,6 +13,7 @@ from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import train_test_split, RandomizedSearchCV
 
@@ -21,7 +23,6 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_forecast_features(trained_columns):
     print("🌐 Fetching 72-hour Forecast Data...")
-    trained_columns = [str(col) for col in trained_columns]  # ✅ Ensure plain strings
     params = {
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
@@ -43,23 +44,57 @@ def get_forecast_features(trained_columns):
         'wind_speed_10m': 'wind_speed', 'dew_point_2m': 'dew_point'
     }
     for api, local in name_map.items():
-        if api in df_forecast.columns: prep[local] = df_forecast[api].astype('float64')
+        if api in df_forecast.columns: 
+            prep[local] = df_forecast[api].astype('float64')
+    
     for col in trained_columns:
-        if col not in prep.columns: prep[col] = 0.0
+        if col not in prep.columns: 
+            prep[col] = 0.0
+            
     return prep[trained_columns], df_forecast['time']
 
 def run_pipeline():
-    project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
+    # --- LOGIN ---
+    api_key = os.getenv('MY_HOPSWORK_KEY')
+    project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
-    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
+
+    # CRITICAL: Use version 4 (or a fresh version) to bypass corrupted metadata
+    # We also check if it exists; if not, we create it cleanly.
+    try:
+        print("🔍 Accessing Feature View...")
+        feature_view = fs.get_feature_view(name="karachi_aqi_view", version=4)
+    except:
+        print("✨ Version 4 not found. Creating a fresh, clean Feature View...")
+        fg = fs.get_feature_group(name="karachi_aqi", version=3)
+        # We select features explicitly from the FG object to ensure metadata is clean
+        query = fg.select_all() 
+        feature_view = fs.create_feature_view(
+            name="karachi_aqi_view",
+            version=4,
+            labels=["aqi"],
+            query=query
+        )
     
     print("📥 Retrieving Training Data...")
-    X_train, X_test, y_train, y_test = feature_view.train_test_split(test_size=0.2)
-
-    # ✅ Convert all columns to plain strings to prevent BinderError
-    X_train.columns = [str(col) for col in X_train.columns]
-    X_test.columns = [str(col) for col in X_test.columns]
+    try:
+        # read() is often more stable than train_test_split directly if there are metadata issues
+        full_df = feature_view.read()
+        train_df, test_df = train_test_split(full_df, test_size=0.2, random_state=42)
+        
+        y_train = train_df[['aqi']]
+        X_train = train_df.drop(columns=['aqi'])
+        y_test = test_df[['aqi']]
+        X_test = test_df.drop(columns=['aqi'])
+    except Exception as e:
+        print(f"❌ Standard retrieval failed: {e}")
+        print("🔄 Attempting fallback: Pulling directly from Feature Group...")
+        fg = fs.get_feature_group(name="karachi_aqi", version=3)
+        df = fg.read()
+        y = df[['aqi']]
+        X = df.drop(columns=['aqi'])
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
@@ -80,8 +115,7 @@ def run_pipeline():
         "SVR": SVR(kernel='rbf')
     }
 
-    print("\n🏆 STARTING TOURNAMENT (All models will be registered)...")
-    print("-" * 50)
+    print("\n🏆 STARTING TOURNAMENT...")
     best_model, best_rmse, best_model_name = None, float('inf'), ""
 
     for name, model in base_models.items():
@@ -98,7 +132,7 @@ def run_pipeline():
         
         print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        # --- LOGIC TO STORE EACH MODEL ---
+        # --- STORE MODEL ---
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -106,32 +140,27 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
-        # Register model version
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 
             description=f"Tournament Participant: {name}"
         )
         current_model.save(iter_model_dir)
-        print(f"✅ {name} registered as a new version.")
 
         if cv_rmse < best_rmse:
             best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
 
-    print("-" * 50)
-    print(f"⭐ TOURNAMENT WINNER: {best_model_name} (CV RMSE: {best_rmse:.4f})")
-    print("✅ All models synced to Registry!")
+    print(f"⭐ WINNER: {best_model_name}")
 
-    # 6. FORECAST GENERATION (Uses the tournament winner)
+    # 6. FORECAST GENERATION
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 7. FORECAST UPLOAD (WITH RESILIENCE)
-    print("🚀 Preparing Forecast Upload...")
-    fg = fs.get_or_create_feature_group(
+    # 7. FORECAST UPLOAD
+    fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
@@ -139,19 +168,9 @@ def run_pipeline():
     for col in ['year', 'month', 'day', 'hour']: 
         forecast_df[col] = forecast_df[col].astype('int64')
     
-    for attempt in range(3):
-        try:
-            print(f"📤 Uploading Forecast (Attempt {attempt+1})...")
-            fg.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
-            print(f"✅ SUCCESS! Karachi forecast is live.")
-            break
-        except Exception as e:
-            print(f"⚠️ Upload attempt failed: {e}")
-            if attempt < 2: 
-                print("⏳ Retrying in 10 seconds...")
-                time.sleep(10)
-            else:
-                print("❌ Final attempt failed. Check Hopsworks UI.")
+    print(f"📤 Uploading Forecast to online store...")
+    fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
+    print(f"✅ SUCCESS!")
 
 if __name__ == "__main__":
     run_pipeline()

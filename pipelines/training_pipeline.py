@@ -64,7 +64,7 @@ def run_pipeline():
     # 100% ERROR-FREE STRATEGY: 
     # Read the data as a dataframe using the read_feature_group method 
     # with 'python' engine and skipping the Query Service entirely.
-    fg = fs.get_feature_group(name="karachi_aqi", version=3)
+    fg = fs.get_feature_group(name="karachi_aqi", version=4)
     
     # This reads the parquet files directly from storage, bypassing DuckDB/Binder errors
     data = fg.read(read_options={"use_hive": False}) 

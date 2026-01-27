@@ -1,23 +1,21 @@
 import os
-
-# 🚫 HARD DISABLE ARROW FLIGHT (must be BEFORE hopsworks import)
-os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
-os.environ["HOPSWORKS_DISABLE_ARROW"] = "True"
-os.environ["ARROW_FLIGHT_ENABLED"] = "False"
-
 import requests
 import pandas as pd
 import hopsworks
 import joblib
 import shutil
-import time
 import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.svm import SVR 
+from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error
 from sklearn.model_selection import RandomizedSearchCV
+
+# 🚫 Disable Arrow Flight BEFORE importing hopsworks
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+os.environ["HOPSWORKS_DISABLE_ARROW"] = "True"
+os.environ["ARROW_FLIGHT_ENABLED"] = "False"
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -65,20 +63,16 @@ def get_forecast_features(trained_columns):
 
     return prep[trained_columns], df_forecast['time']
 
-
 def run_pipeline():
     project = hopsworks.login(api_key_value=os.getenv("MY_HOPSWORK_KEY"))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    feature_view = fs.get_feature_view(
-        name="karachi_aqi_view",
-        version=3
-    )
+    # ✅ Fetch existing FeatureView safely
+    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
 
     print("📥 Retrieving Training Data (Hive backend forced)...")
 
-    # ✅ CRITICAL FIX — force Hive instead of Arrow Flight
     X_train, X_test, y_train, y_test = feature_view.train_test_split(
         test_size=0.2,
         read_options={"use_hive": True}
@@ -119,7 +113,6 @@ def run_pipeline():
             scoring="neg_root_mean_squared_error",
             n_jobs=-1
         )
-
         search.fit(X_train_scaled, y_train.values.ravel())
 
         cv_rmse = -search.best_score_
@@ -141,7 +134,6 @@ def run_pipeline():
             metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse},
             description=f"Tournament Participant: {name}"
         )
-
         model_version.save(model_dir)
         print(f"✅ {name} registered")
 
@@ -176,7 +168,6 @@ def run_pipeline():
     )
 
     print("🚀 Forecast uploaded successfully")
-
 
 if __name__ == "__main__":
     run_pipeline()

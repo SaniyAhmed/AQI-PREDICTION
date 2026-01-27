@@ -1,5 +1,5 @@
 import os
-# Force disable the Arrow Flight client to use the REST API (more stable for small/medium datasets)
+# Force disable the Arrow Flight client to avoid gRPC/Binder errors
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
@@ -59,45 +59,28 @@ def run_pipeline():
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
-
-    # CRITICAL: Use version 4 (or a fresh version) to bypass corrupted metadata
-    # We also check if it exists; if not, we create it cleanly.
-    try:
-        print("🔍 Accessing Feature View...")
-        feature_view = fs.get_feature_view(name="karachi_aqi_view", version=4)
-    except:
-        print("✨ Version 4 not found. Creating a fresh, clean Feature View...")
-        fg = fs.get_feature_group(name="karachi_aqi", version=3)
-        # We select features explicitly from the FG object to ensure metadata is clean
-        query = fg.select_all() 
-        feature_view = fs.create_feature_view(
-            name="karachi_aqi_view",
-            version=4,
-            labels=["aqi"],
-            query=query
-        )
     
-    print("📥 Retrieving Training Data...")
-    try:
-        # read() is often more stable than train_test_split directly if there are metadata issues
-        full_df = feature_view.read()
-        train_df, test_df = train_test_split(full_df, test_size=0.2, random_state=42)
-        
-        y_train = train_df[['aqi']]
-        X_train = train_df.drop(columns=['aqi'])
-        y_test = test_df[['aqi']]
-        X_test = test_df.drop(columns=['aqi'])
-    except Exception as e:
-        print(f"❌ Standard retrieval failed: {e}")
-        print("🔄 Attempting fallback: Pulling directly from Feature Group...")
-        fg = fs.get_feature_group(name="karachi_aqi", version=3)
-        df = fg.read()
-        y = df[['aqi']]
-        X = df.drop(columns=['aqi'])
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+    # Get Feature View for metadata/registration
+    feature_view = fs.get_feature_view(name="karachi_aqi_view", version=3)
+    
+    print("📥 Retrieving Training Data (Bypassing Query Service for Stability)...")
+    # PERMANENT FIX: Read directly from the Feature Group to avoid the Binder Error
+    # This retrieves the data as a Pandas DF without using the corrupted DuckDB query service.
+    fg = fs.get_feature_group(name="karachi_aqi", version=3)
+    data = fg.read()
+    
+    # Define features and target based on your logic
+    y = data[['aqi']]
+    X = data.drop(columns=['aqi'])
+    
+    # Perform the split locally
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
-    X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
+    # Clean up NaNs
+    X_train = X_train.dropna()
+    y_train = y_train.loc[X_train.index]
+    X_test = X_test.dropna()
+    y_test = y_test.loc[X_test.index]
 
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -115,7 +98,8 @@ def run_pipeline():
         "SVR": SVR(kernel='rbf')
     }
 
-    print("\n🏆 STARTING TOURNAMENT...")
+    print("\n🏆 STARTING TOURNAMENT (All models will be registered)...")
+    print("-" * 50)
     best_model, best_rmse, best_model_name = None, float('inf'), ""
 
     for name, model in base_models.items():
@@ -130,9 +114,9 @@ def run_pipeline():
         test_preds = search.best_estimator_.predict(X_test_scaled)
         test_rmse = root_mean_squared_error(y_test, test_preds)
         
-        print(f"   📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
+        print(f"    📊 {name:12} -> CV RMSE: {cv_rmse:.4f} | TEST RMSE: {test_rmse:.4f}")
 
-        # --- STORE MODEL ---
+        # --- LOGIC TO STORE EACH MODEL ---
         iter_model_dir = f"model_dir_{name.lower()}"
         if os.path.exists(iter_model_dir): shutil.rmtree(iter_model_dir)
         os.makedirs(iter_model_dir)
@@ -140,19 +124,24 @@ def run_pipeline():
         joblib.dump(search.best_estimator_, f"{iter_model_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{iter_model_dir}/scaler.pkl")
 
+        # Register model version in Model Registry
         current_model = mr.python.create_model(
             name="karachi_aqi_model", 
-            metrics={"cv_rmse": cv_rmse, "test_rmse": test_rmse}, 
+            metrics={"cv_rmse": float(cv_rmse), "test_rmse": float(test_rmse)}, 
             description=f"Tournament Participant: {name}"
         )
         current_model.save(iter_model_dir)
+        print(f"✅ {name} registered as a new version.")
 
+        # Determine winner based on CV RMSE
         if cv_rmse < best_rmse:
             best_rmse, best_model, best_model_name = cv_rmse, search.best_estimator_, name
 
-    print(f"⭐ WINNER: {best_model_name}")
+    print("-" * 50)
+    print(f"⭐ TOURNAMENT WINNER: {best_model_name} (CV RMSE: {best_rmse:.4f})")
+    print("✅ All models synced to Registry!")
 
-    # 6. FORECAST GENERATION
+    # 6. FORECAST GENERATION (Uses the tournament winner)
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_model.predict(scaler.transform(X_f))
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
@@ -160,17 +149,30 @@ def run_pipeline():
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
     # 7. FORECAST UPLOAD
+    print("🚀 Preparing Forecast Upload...")
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
     
+    # Ensure types match the Feature Group schema exactly
     for col in ['year', 'month', 'day', 'hour']: 
         forecast_df[col] = forecast_df[col].astype('int64')
     
-    print(f"📤 Uploading Forecast to online store...")
-    fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
-    print(f"✅ SUCCESS!")
+    for attempt in range(3):
+        try:
+            print(f"📤 Uploading Forecast (Attempt {attempt+1})...")
+            # Using online_enabled=True requires this insert
+            fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
+            print(f"✅ SUCCESS! Karachi forecast is live.")
+            break
+        except Exception as e:
+            print(f"⚠️ Upload attempt failed: {e}")
+            if attempt < 2: 
+                print("⏳ Retrying in 10 seconds...")
+                time.sleep(10)
+            else:
+                print("❌ Final attempt failed.")
 
 if __name__ == "__main__":
     run_pipeline()

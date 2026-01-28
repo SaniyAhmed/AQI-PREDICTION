@@ -51,27 +51,33 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns].ffill().bfill(), df_f['time']
 
 def run_pipeline():
+    # --- LOGIN ---
     api_key = os.getenv('MY_HOPSWORK_KEY')
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # --- 1. DATA BYPASS (STRICTLY INTACT FOR GITHUB ACTIONS) ---
+    # --- 1. DATA BYPASS (STRICTLY MAINTAINED FOR GITHUB ACTIONS) ---
     print("📥 Bypassing Feature Store Services... Downloading raw parquet files.")
     dataset_api = project.get_dataset_api()
     
-    # CHECK THIS PATH IN HOPSWORKS DATASETS UI:
-    # It is likely Resources/FeatureStore/aqi_prediction_123_featurestore/karachi_aqi_5 (or similar)
-    # The error says 'karachi_aqi_4' was not found.
-    remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_5" 
+    # Note: We try to find the folder dynamically. 
+    # Usually it is Resources/FeatureStore/{fs_name}/{fg_name}_{version}
+    # Based on your previous error, let's try to locate karachi_aqi_4 or karachi_aqi_5
+    remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_4" 
     local_dir = "./raw_data"
     
     if os.path.exists(local_dir): shutil.rmtree(local_dir)
     os.makedirs(local_dir)
 
-    # Removed try/except so GitHub Actions correctly identifies a failure
-    dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
-    
+    print(f"📂 Attempting download from: {remote_path}")
+    try:
+        dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
+    except Exception as e:
+        print(f"⚠️ Failed to find path {remote_path}. Trying fallback path 'karachi_aqi_5'...")
+        remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_5"
+        dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
+
     parquet_files = []
     for root, dirs, files in os.walk(local_dir):
         for file in files:
@@ -79,13 +85,15 @@ def run_pipeline():
                 parquet_files.append(os.path.join(root, file))
     
     if not parquet_files:
-        raise Exception(f"No Parquet files found in {remote_path}. Please check the path in Hopsworks.")
+        raise Exception("No Parquet files found. Pipeline cannot continue.")
         
+    print(f"📄 Found {len(parquet_files)} data files. Loading...")
     data_list = [pd.read_parquet(f) for f in parquet_files]
     data = pd.concat(data_list, ignore_index=True)
+    
+    # Clean system columns
     system_cols = ['_hoodie_commit_time', '_hoodie_commit_seqno', '_hoodie_record_key', '_hoodie_partition_path', '_hoodie_file_name']
     data = data.drop(columns=[c for c in system_cols if c in data.columns]).dropna()
-
     print(f"✅ Data loaded: {len(data)} rows.")
 
     # --- 2. PREP ---
@@ -97,7 +105,7 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # --- 3. TOURNAMENT TUNING ---
+    # --- 3. TOURNAMENT TUNING (FROM CODE 1) ---
     param_grids = {
         "RandomForest": {
             "n_estimators": [300, 500], 
@@ -115,14 +123,23 @@ def run_pipeline():
         "SVR": SVR(kernel='rbf')
     }
 
+    print("\n🏆 STARTING TOURNAMENT...")
     best_m, best_score, best_name = None, float('inf'), ""
 
     for name, model in base_models.items():
         print(f"🔍 Tuning {name}...")
         n_cands = 10 if name == "RandomForest" else 4
+        
         search = HalvingRandomSearchCV(
-            model, param_grids[name], factor=3, cv=3, n_candidates=n_cands,
-            min_resources='exhaust', scoring='neg_root_mean_squared_error', n_jobs=-1, random_state=42
+            model, 
+            param_grids[name], 
+            factor=3, 
+            cv=3, 
+            n_candidates=n_cands,
+            min_resources='exhaust',
+            scoring='neg_root_mean_squared_error', 
+            n_jobs=-1, 
+            random_state=42
         )
         search.fit(X_train_s, y_train.values.ravel())
         
@@ -132,6 +149,7 @@ def run_pipeline():
         
         print(f"    📊 {name:12} -> CV RMSE: {cv_report_rmse:.2f} | FINAL TEST RMSE: {test_rmse:.4f}")
 
+        # Save and Register
         m_dir = f"model_dir_{name.lower()}"
         if os.path.exists(m_dir): shutil.rmtree(m_dir)
         os.makedirs(m_dir)
@@ -140,21 +158,24 @@ def run_pipeline():
         
         mr.python.create_model(
             name=f"karachi_aqi_{name.lower()}", 
-            metrics={"test_rmse": float(test_rmse), "cv_rmse": float(cv_report_rmse)}
+            metrics={"test_rmse": float(test_rmse), "cv_rmse": float(cv_report_rmse)},
+            description=f"GitHub Actions Tournament: {name}"
         ).save(m_dir)
 
         if test_rmse < best_score:
             best_score, best_m, best_name = test_rmse, final_model, name
 
-    print(f"⭐ OVERALL WINNER: {best_name}")
+    print("-" * 50 + f"\n⭐ OVERALL WINNER: {best_name} (Test RMSE: {best_score:.4f})\n" + "-" * 50)
     
     # --- 4. FORECAST & UPLOAD ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_m.predict(scaler.transform(X_f))
+    
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
+    # Ensure bigint compatibility
     for col in ['year', 'month', 'day', 'hour']:
         forecast_df[col] = forecast_df[col].astype('int64')
 
@@ -162,6 +183,8 @@ def run_pipeline():
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
+    
+    print("🚀 Preparing Forecast Upload...")
     fg.insert(forecast_df, write_options={"wait_for_job": False})
     print(f"✅ SUCCESS! {best_name} forecast uploaded.")
 

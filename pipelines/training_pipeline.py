@@ -28,7 +28,6 @@ def get_forecast_features(trained_columns):
     df_f = pd.DataFrame(res["hourly"])
     df_f['time'] = pd.to_datetime(df_f['time'])
     
-    # Cast specifically to int64 to match Hopsworks 'bigint'
     prep = pd.DataFrame({
         'year': df_f['time'].dt.year.astype('int64'), 
         'month': df_f['time'].dt.month.astype('int64'),
@@ -52,7 +51,6 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns].ffill().bfill(), df_f['time']
 
 def run_pipeline():
-    # --- LOGIN ---
     api_key = os.getenv('MY_HOPSWORK_KEY')
     project = hopsworks.login(api_key_value=api_key)
     fs = project.get_feature_store()
@@ -61,31 +59,32 @@ def run_pipeline():
     # --- 1. DATA BYPASS (STRICTLY INTACT FOR GITHUB ACTIONS) ---
     print("📥 Bypassing Feature Store Services... Downloading raw parquet files.")
     dataset_api = project.get_dataset_api()
-    remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_4"
+    
+    # CHECK THIS PATH IN HOPSWORKS DATASETS UI:
+    # It is likely Resources/FeatureStore/aqi_prediction_123_featurestore/karachi_aqi_5 (or similar)
+    # The error says 'karachi_aqi_4' was not found.
+    remote_path = f"Resources/FeatureStore/{fs.name}/karachi_aqi_5" 
     local_dir = "./raw_data"
     
     if os.path.exists(local_dir): shutil.rmtree(local_dir)
     os.makedirs(local_dir)
 
-    try:
-        dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
-        parquet_files = []
-        for root, dirs, files in os.walk(local_dir):
-            for file in files:
-                if file.endswith(".parquet"):
-                    parquet_files.append(os.path.join(root, file))
+    # Removed try/except so GitHub Actions correctly identifies a failure
+    dataset_api.download(remote_path, local_path=local_dir, overwrite=True)
+    
+    parquet_files = []
+    for root, dirs, files in os.walk(local_dir):
+        for file in files:
+            if file.endswith(".parquet"):
+                parquet_files.append(os.path.join(root, file))
+    
+    if not parquet_files:
+        raise Exception(f"No Parquet files found in {remote_path}. Please check the path in Hopsworks.")
         
-        if not parquet_files:
-            raise Exception("No Parquet files found.")
-            
-        data_list = [pd.read_parquet(f) for f in parquet_files]
-        data = pd.concat(data_list, ignore_index=True)
-        system_cols = ['_hoodie_commit_time', '_hoodie_commit_seqno', '_hoodie_record_key', '_hoodie_partition_path', '_hoodie_file_name']
-        data = data.drop(columns=[c for c in system_cols if c in data.columns]).dropna()
-
-    except Exception as e:
-        print(f"❌ Data download failed: {e}")
-        return
+    data_list = [pd.read_parquet(f) for f in parquet_files]
+    data = pd.concat(data_list, ignore_index=True)
+    system_cols = ['_hoodie_commit_time', '_hoodie_commit_seqno', '_hoodie_record_key', '_hoodie_partition_path', '_hoodie_file_name']
+    data = data.drop(columns=[c for c in system_cols if c in data.columns]).dropna()
 
     print(f"✅ Data loaded: {len(data)} rows.")
 
@@ -98,7 +97,7 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # --- 3. TOURNAMENT TUNING (TRANSFERRED FROM CODE 1) ---
+    # --- 3. TOURNAMENT TUNING ---
     param_grids = {
         "RandomForest": {
             "n_estimators": [300, 500], 
@@ -116,24 +115,14 @@ def run_pipeline():
         "SVR": SVR(kernel='rbf')
     }
 
-    print("\n🏆 STARTING TOURNAMENT...")
     best_m, best_score, best_name = None, float('inf'), ""
 
     for name, model in base_models.items():
         print(f"🔍 Tuning {name}...")
-        # Higher candidates for RF to ensure it finds the optimal depth
         n_cands = 10 if name == "RandomForest" else 4
-        
         search = HalvingRandomSearchCV(
-            model, 
-            param_grids[name], 
-            factor=3, 
-            cv=3, 
-            n_candidates=n_cands,
-            min_resources='exhaust',
-            scoring='neg_root_mean_squared_error', 
-            n_jobs=-1, 
-            random_state=42
+            model, param_grids[name], factor=3, cv=3, n_candidates=n_cands,
+            min_resources='exhaust', scoring='neg_root_mean_squared_error', n_jobs=-1, random_state=42
         )
         search.fit(X_train_s, y_train.values.ravel())
         
@@ -143,7 +132,6 @@ def run_pipeline():
         
         print(f"    📊 {name:12} -> CV RMSE: {cv_report_rmse:.2f} | FINAL TEST RMSE: {test_rmse:.4f}")
 
-        # --- SAVE & REGISTER EACH MODEL ---
         m_dir = f"model_dir_{name.lower()}"
         if os.path.exists(m_dir): shutil.rmtree(m_dir)
         os.makedirs(m_dir)
@@ -152,24 +140,21 @@ def run_pipeline():
         
         mr.python.create_model(
             name=f"karachi_aqi_{name.lower()}", 
-            metrics={"test_rmse": float(test_rmse), "cv_rmse": float(cv_report_rmse)},
-            description=f"Automated Tournament: {name}"
+            metrics={"test_rmse": float(test_rmse), "cv_rmse": float(cv_report_rmse)}
         ).save(m_dir)
 
         if test_rmse < best_score:
             best_score, best_m, best_name = test_rmse, final_model, name
 
-    print("-" * 50 + f"\n⭐ OVERALL WINNER: {best_name} (Test RMSE: {best_score:.4f})\n" + "-" * 50)
+    print(f"⭐ OVERALL WINNER: {best_name}")
     
     # --- 4. FORECAST & UPLOAD ---
     X_f, times = get_forecast_features(X_train.columns.tolist())
     preds = best_m.predict(scaler.transform(X_f))
-    
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # Final cast to int64 to ensure Hopsworks BigInt compatibility
     for col in ['year', 'month', 'day', 'hour']:
         forecast_df[col] = forecast_df[col].astype('int64')
 
@@ -177,10 +162,8 @@ def run_pipeline():
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
-    
-    print("🚀 Uploading Tournament Winner's Forecast...")
     fg.insert(forecast_df, write_options={"wait_for_job": False})
-    print(f"✅ Pipeline Completed! {best_name} prediction is live.")
+    print(f"✅ SUCCESS! {best_name} forecast uploaded.")
 
 if __name__ == "__main__":
     run_pipeline()

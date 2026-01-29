@@ -9,12 +9,12 @@ import shutil
 import time
 import numpy as np
 from xgboost import XGBRegressor
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
 from sklearn.experimental import enable_halving_search_cv 
-from sklearn.model_selection import HalvingRandomSearchCV
+from sklearn.model_selection import HalvingRandomSearchCV, train_test_split
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -54,10 +54,31 @@ def run_pipeline():
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
-    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
     
     print("📥 Fetching Data...")
-    X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
+    
+    # ✅ CRITICAL FIX: Read directly from Feature Group instead of Feature View
+    # Feature Views don't work in GitHub Actions, but Feature Groups do!
+    try:
+        # Try to use Feature View (works in VS Code)
+        fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
+        X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
+        print("✅ Loaded data using Feature View")
+    except Exception as e:
+        print(f"⚠️ Feature View failed (normal in GitHub Actions): {str(e)[:100]}")
+        print("🔄 Switching to Feature Group direct read...")
+        
+        # Fallback: Read from Feature Group (works in GitHub Actions)
+        fg = fs.get_feature_group(name="karachi_aqi", version=1)
+        full_df = fg.read()
+        
+        # Manual train/test split
+        target = "aqi"
+        X = full_df.drop(columns=[target])
+        y = full_df[[target]]
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        print(f"✅ Loaded {len(full_df)} rows from Feature Group")
+    
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 
@@ -68,25 +89,25 @@ def run_pipeline():
     # --- ULTRA-OPTIMIZED PARAMETERS - RandomForest DOMINANCE ---
     param_grids = {
         "RandomForest": {
-            "n_estimators": [800, 1000],              # MASSIVE ensemble for stability
-            "max_depth": [20, 25, 30],                # Deep trees to capture all patterns
-            "min_samples_leaf": [1, 2],               # Allow fine-grained splits
-            "min_samples_split": [2, 3],              # More aggressive splitting
-            "max_features": ["sqrt", 0.7, 0.8],       # Try more features per tree
+            "n_estimators": [800, 1000],
+            "max_depth": [20, 25, 30],
+            "min_samples_leaf": [1, 2],
+            "min_samples_split": [2, 3],
+            "max_features": ["sqrt", 0.7, 0.8],
             "bootstrap": [True],
-            "max_samples": [0.85, 0.95],              # Use more data per tree
-            "min_impurity_decrease": [0.0, 0.0001]    # Allow slight improvements
+            "max_samples": [0.85, 0.95],
+            "min_impurity_decrease": [0.0, 0.0001]
         },
         "XGBoost": {
-            "n_estimators": [200, 300],               # Reduced from 500
-            "learning_rate": [0.05, 0.07],            # Slower learning
-            "max_depth": [4, 5],                      # Shallower trees
-            "min_child_weight": [5],                  # More conservative
+            "n_estimators": [200, 300],
+            "learning_rate": [0.05, 0.07],
+            "max_depth": [4, 5],
+            "min_child_weight": [5],
             "subsample": [0.8],
             "colsample_bytree": [0.8],
-            "gamma": [0.3],                           # Higher minimum split gain
+            "gamma": [0.3],
             "reg_alpha": [0.5],
-            "reg_lambda": [2.0]                       # Stronger regularization
+            "reg_lambda": [2.0]
         }, 
         "SVR": {
             "C": [10.0, 15.0],
@@ -102,7 +123,7 @@ def run_pipeline():
             n_jobs=-1,
             warm_start=False,
             oob_score=False,
-            criterion='squared_error'  # Best for RMSE optimization
+            criterion='squared_error'
         ),
         "XGBoost": XGBRegressor(
             random_state=42, 
@@ -112,7 +133,7 @@ def run_pipeline():
         "SVR": SVR(cache_size=1000)
     }
 
-    print("\n🏆 TOURNAMENT - RANDOMFOREST OPTIMIZED TO DOMINATE")
+    print("\n🏆 TOURNAMENT")
     print("=" * 60)
     best_m, best_score, best_name = None, float('inf'), ""
 
@@ -123,11 +144,10 @@ def run_pipeline():
         for p in param_grids[name].values(): 
             param_size *= len(p)
         
-        # Give RandomForest MORE search iterations
         if name == "RandomForest":
-            n_cands = min(30, param_size)  # More candidates for RF
+            n_cands = min(30, param_size)
         else:
-            n_cands = min(15, param_size)  # Fewer for others
+            n_cands = min(15, param_size)
         
         search = HalvingRandomSearchCV(
             model, 
@@ -146,7 +166,6 @@ def run_pipeline():
         
         final_model = search.best_estimator_
         
-        # Comprehensive evaluation
         train_preds = final_model.predict(X_train_s)
         test_preds = final_model.predict(X_test_s)
         
@@ -192,7 +211,7 @@ def run_pipeline():
     print("\n" + "=" * 60)
     print(f"🏆 CHAMPION: {best_name} (Test RMSE: {best_score:.4f})")
     if best_score < 1.0:
-        print("✅ ELITE PERFORMANCE: RMSE < 1.0!")
+        print("✅ ELITE PERFORMANCE")
     else:
         print(f"⚠️ Close! Gap to target: {best_score - 1.0:.4f}")
     print("=" * 60)

@@ -3,18 +3,17 @@ requests
 pytz
 
 # --- Hopsworks & Data Engineering ---
-hopsworks
+hopsworks==4.2.*
 confluent-kafka
 pyarrow
 
 # --- Machine Learning & Modeling ---
 xgboost
-scikit-learn
+scikit-learn==1.5.2
 joblib
 
 # --- Utilities ---
 datetime
-# os, time, shutil are built-in and do not need to be listed
 numpy==1.26.4
 pandas==2.2.2
 streamlit

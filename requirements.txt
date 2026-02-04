@@ -2,8 +2,9 @@
 requests
 pytz
 
-# --- Hopsworks & Data Engineering ---
+# --- Hopsworks & Data Engineering (pinned for speed) ---
 hopsworks==3.4.4
+hsfs==3.4.8
 confluent-kafka
 pyarrow
 

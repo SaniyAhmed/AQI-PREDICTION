@@ -3,10 +3,10 @@ requests
 pytz
 
 # --- Hopsworks & Data Engineering ---
-hopsworks
+hopsworks==3.4.6
 hsfs[python]==3.4.6
-confluent-kafka
-pyarrow
+avro==1.11.0
+pyhumps==1.6.1
 
 # --- Machine Learning & Modeling ---
 xgboost
@@ -15,7 +15,8 @@ joblib
 
 # --- Utilities ---
 numpy==1.26.4
-pandas==2.1.4
+# We must use 2.0.3 to satisfy hsfs 3.4.6
+pandas==2.0.3
 flask
 flask-cors
 streamlit

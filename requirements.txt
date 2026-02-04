@@ -1,22 +1,27 @@
-# ---- Frameworks ----
-hopsworks==4.2.2
+# --- Core Data & API ---
+requests
+pytz
+
+# --- Hopsworks & Data Engineering ---
+hopsworks==4.2.*
 hsfs[python]==4.2.2
+confluent-kafka
+pyarrow
+
+# --- Machine Learning & Modeling ---
+xgboost
+scikit-learn==1.5.2
+joblib
+
+# --- Utilities ---
+datetime
+numpy==1.26.4
+pandas==2.1.4
 flask==3.0.3
 flask-cors==4.0.1
 streamlit==1.35.0
-
-# ---- Data Science & ML ----
-pandas>=1.5.3,<2.2.0
-numpy<2.0.0
-scikit-learn==1.5.0
-xgboost==2.0.3
-joblib==1.4.2
-shap==0.45.1
-matplotlib==3.9.0
-
-# ---- Integration & Visuals ----
-requests==2.32.3
-pyarrow==16.1.0
-plotly==5.22.0
+matplotlib
+plotly
+shap
 python-dotenv==1.0.1
 tqdm==4.66.4

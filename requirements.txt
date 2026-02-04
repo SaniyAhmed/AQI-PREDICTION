@@ -2,25 +2,29 @@
 requests
 pytz
 
-# --- Hopsworks & Data Engineering (pinned for speed) ---
-hopsworks==3.4.4
-hsfs==3.4.8
-confluent-kafka
-pyarrow
+# --- Hopsworks (minimal install) ---
+hopsworks
 
 # --- Machine Learning & Modeling ---
 xgboost
 scikit-learn
 joblib
 
-# --- Utilities ---
+# --- Data Processing ---
 numpy==1.26.4
 pandas==2.2.2
+pyarrow
+
+# --- Web Framework ---
 flask
 flask-cors
 streamlit
+
+# --- Visualization ---
 matplotlib
 plotly
 shap
+
+# --- Utilities ---
 python-dotenv
 tqdm

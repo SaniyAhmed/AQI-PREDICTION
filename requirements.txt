@@ -4,7 +4,7 @@ pytz
 
 # --- Hopsworks & Data Engineering ---
 hopsworks==4.2.*
-hsfs[python]==4.2.2
+hsfs[python]
 confluent-kafka
 pyarrow
 

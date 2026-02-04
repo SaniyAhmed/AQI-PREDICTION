@@ -3,8 +3,8 @@ requests
 pytz
 
 # --- Hopsworks & Data Engineering ---
-hopsworks==3.7.0
-hsfs[python]==3.7.0
+hopsworks==3.7.*
+hsfs[python]==3.7.*
 confluent-kafka
 pyarrow
 

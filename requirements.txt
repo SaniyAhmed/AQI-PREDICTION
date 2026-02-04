@@ -3,11 +3,9 @@ requests
 pytz
 
 # --- Hopsworks & Data Engineering ---
-# Moving to the 4.x series to match the Server 4.2.2
-hopsworks==4.1.8
-hsfs[python]==4.1.8
-avro==1.11.0
-pyhumps==1.6.1
+hopsworks==3.4.4
+confluent-kafka
+pyarrow
 
 # --- Machine Learning & Modeling ---
 xgboost
@@ -16,7 +14,7 @@ joblib
 
 # --- Utilities ---
 numpy==1.26.4
-pandas==2.1.4
+pandas==2.2.2
 flask
 flask-cors
 streamlit

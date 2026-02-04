@@ -4,7 +4,7 @@ pytz
 
 # --- Hopsworks & Data Engineering ---
 hopsworks
-hsfs[python]=3.4.6
+hsfs[python]==3.4.6
 confluent-kafka
 pyarrow
 
@@ -14,8 +14,8 @@ scikit-learn
 joblib
 
 # --- Utilities ---
-numpy
-pandas
+numpy==1.26.4
+pandas==2.1.4
 flask
 flask-cors
 streamlit

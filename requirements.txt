@@ -3,8 +3,8 @@ requests
 pytz
 
 # --- Hopsworks & Data Engineering ---
-hopsworks==4.2.*
-hsfs[python]
+hopsworks==3.7.0
+hsfs[python]==3.7.0
 confluent-kafka
 pyarrow
 
@@ -14,7 +14,6 @@ scikit-learn==1.5.2
 joblib
 
 # --- Utilities ---
-datetime
 numpy==1.26.4
 pandas==2.1.4
 flask==3.0.3

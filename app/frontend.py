@@ -3,6 +3,10 @@ import pandas as pd
 import plotly.express as px
 import os
 import sys
+import warnings
+
+# Suppress incompatibility warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='hopsworks')
 
 # ===== CRITICAL: SET ENVIRONMENT VARIABLES BEFORE ANY HOPSWORKS IMPORT =====
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
@@ -176,146 +180,111 @@ def fetch_hopsworks_data():
             st.error(f"❌ Cannot access feature group: {str(e)}")
             return None, best_model_obj, leaderboard
 
-        # === METHOD 1: Get storage connector directly and read parquet files ===
+        # === METHOD 1: Simple read() with minimal options ===
         try:
-            st.info("🔍 Reading directly from Hopsworks storage layer...")
+            st.info("🔍 Method 1: Basic read() call...")
             
-            # Access internal storage connector
-            storage_connector = fs.get_storage_connector("hopsfsconnector", "HOPSFS")
-            
-            # Get the feature group location
-            fg_location = fg._get_feature_group_url()
-            
-            st.info(f"📂 Storage location identified: {fg_location[:100]}...")
-            
-            # Try to read using the internal engine without Query Service
-            from hsfs.engine import python
-            engine = python.Engine()
-            
-            # Force offline read without query service
-            df = engine.read(
-                storage_connector,
-                data_format="parquet", 
-                read_options={}
-            )
+            # Simplest possible read
+            df = fg.read(online=False)
             
             if df is not None and not df.empty:
-                st.success(f"✅ Successfully read {len(df)} records from storage!")
+                st.success(f"✅ Method 1 successful! Read {len(df)} records")
             else:
-                raise ValueError("Empty dataframe from storage")
+                raise ValueError("Empty dataframe")
                 
         except Exception as e1:
             st.warning(f"⚠️ Method 1 failed: {str(e1)[:200]}")
             
-            # === METHOD 2: Use pandas to read parquet directly ===
+            # === METHOD 2: Read with explicit pandas dataframe type ===
             try:
-                st.info("🔍 Attempting direct parquet file access...")
+                st.info("🔍 Method 2: Read with dataframe_type='pandas'...")
                 
-                # Get all parquet files from feature group
-                import pyarrow.parquet as pq
-                import pyarrow as pa
-                
-                # Try to access the feature group's underlying storage
-                fg_path = f"/apps/hive/warehouse/{project.name.lower()}_featurestore.db/{fg.name}_{fg.version}"
-                
-                st.info(f"📂 Trying path: {fg_path}")
-                
-                # This should work if we have direct file access
-                df = pd.read_parquet(fg_path)
+                df = fg.read(
+                    online=False,
+                    dataframe_type="pandas"
+                )
                 
                 if df is not None and not df.empty:
-                    st.success(f"✅ Successfully read {len(df)} records via parquet!")
+                    st.success(f"✅ Method 2 successful! Read {len(df)} records")
                 else:
-                    raise ValueError("Empty dataframe from parquet")
+                    raise ValueError("Empty dataframe")
                     
             except Exception as e2:
                 st.warning(f"⚠️ Method 2 failed: {str(e2)[:200]}")
                 
-                # === METHOD 3: SQL Query with explicit dataframe engine ===
+                # === METHOD 3: Get batch data via Feature View approach ===
                 try:
-                    st.info("🔍 Attempting SQL query with dataframe engine...")
+                    st.info("🔍 Method 3: Creating temporary Feature View...")
                     
-                    # Create a simple query without complex parsing
-                    query = fg.select(["prediction_timestamp", "predicted_aqi"])
+                    # Create a temporary feature view name
+                    import time
+                    temp_view_name = f"temp_view_{int(time.time())}"
                     
-                    # Force to use pandas engine instead of Arrow/Flight
-                    df = query.read(
-                        dataframe_type="pandas",
-                        read_options={
-                            "use_hive": False,
-                            "external": False
-                        }
-                    )
+                    try:
+                        # Try to create a feature view
+                        query = fg.select_all()
+                        fv = fs.create_feature_view(
+                            name=temp_view_name,
+                            version=1,
+                            query=query
+                        )
+                        
+                        # Get the data
+                        df = fv.get_batch_data()
+                        
+                        # Clean up - try to delete the temp view
+                        try:
+                            fv.delete()
+                        except:
+                            pass
+                        
+                    except Exception as fv_error:
+                        # If creation fails, try to get existing one
+                        st.info("Trying to use existing feature view...")
+                        fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
+                        df = fv.get_batch_data()
                     
                     if df is not None and not df.empty:
-                        st.success(f"✅ Successfully queried {len(df)} records!")
+                        st.success(f"✅ Method 3 successful! Read {len(df)} records")
                     else:
-                        raise ValueError("Empty result from query")
+                        raise ValueError("Empty dataframe from feature view")
                         
                 except Exception as e3:
                     st.warning(f"⚠️ Method 3 failed: {str(e3)[:200]}")
                     
-                    # === METHOD 4: REST API Direct Call ===
+                    # === METHOD 4: Use simple select().read() ===
                     try:
-                        st.info("🔍 Attempting direct REST API call...")
+                        st.info("🔍 Method 4: Using select().read()...")
                         
-                        import requests
+                        # Select all columns and read
+                        df = fg.select_all().read(online=False)
                         
-                        # Get project and API details
-                        host = project._project_api._client._host
-                        project_id = project.id
-                        
-                        # Construct API endpoint
-                        api_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/preview"
-                        
-                        headers = {
-                            "Authorization": f"ApiKey {api_key}",
-                            "Content-Type": "application/json"
-                        }
-                        
-                        # Request preview data
-                        response = requests.get(
-                            api_url,
-                            headers=headers,
-                            params={"limit": 1000}
-                        )
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            
-                            # Parse the preview data into dataframe
-                            if 'items' in data:
-                                df = pd.DataFrame(data['items'])
-                            elif isinstance(data, list):
-                                df = pd.DataFrame(data)
-                            else:
-                                # Try to extract data from response
-                                df = pd.DataFrame([data])
-                            
-                            if df is not None and not df.empty:
-                                st.success(f"✅ Successfully fetched {len(df)} records via REST API!")
-                            else:
-                                raise ValueError("No data in API response")
+                        if df is not None and not df.empty:
+                            st.success(f"✅ Method 4 successful! Read {len(df)} records")
                         else:
-                            raise ValueError(f"API returned status {response.status_code}")
+                            raise ValueError("Empty result from select")
                             
                     except Exception as e4:
-                        st.error(f"❌ All data access methods failed!")
-                        st.error(f"Final error: {str(e4)[:200]}")
+                        st.error(f"❌ All 4 data access methods failed!")
                         
                         # Show detailed error information
                         with st.expander("🔧 Detailed Error Log"):
                             st.code(f"""
-Method 1 Error: {str(e1)[:300]}
+Method 1 (Basic read): 
+{str(e1)[:300]}
 
-Method 2 Error: {str(e2)[:300]}
+Method 2 (Pandas read): 
+{str(e2)[:300]}
 
-Method 3 Error: {str(e3)[:300]}
+Method 3 (Feature View): 
+{str(e3)[:300]}
 
-Method 4 Error: {str(e4)[:300]}
+Method 4 (Select read): 
+{str(e4)[:300]}
                             """)
                         
                         st.error("❌ Unable to fetch real data from Hopsworks")
+                        st.info("💡 The Query Service version mismatch is preventing data access.")
                         return None, best_model_obj, leaderboard
 
         # Process the dataframe

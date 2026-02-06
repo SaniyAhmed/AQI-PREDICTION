@@ -4,36 +4,35 @@ This script runs in GitHub Actions to sync data hourly
 """
 import os
 
-# ✅ THE FIX: Disable the buggy Flight Client before hopsworks is initialized
+# ✅ FORCE DISABLE FLIGHT CLIENT
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import hopsworks
 import pandas as pd
 
 print("🔐 Logging into Hopsworks...")
-# ✅ Using the exact login method from your running script
 project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
 fs = project.get_feature_store()
-mr = project.get_model_registry()
 
 print("📥 Fetching Data...")
 
-# ✅ CRITICAL FIX: Read directly from Feature Group instead of Feature View
-# Feature Views don't work in GitHub Actions, but Feature Groups do!
+# ✅ IMPLEMENTING THE FIX:
+# We use engine="hive" explicitly in the read calls to ensure 
+# it doesn't use the buggy Arrow Flight Query Service.
 try:
-    # Try to use Feature View (works in VS Code)
+    print("Trying Feature View with Hive engine...")
     fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-    # Keeping your existing logic structure
-    df = fv.get_batch_data()
-    print("✅ Loaded data using Feature View")
+    # Using read() with engine="hive" is the most stable way in GitHub Actions
+    df = fv.get_batch_data(read_options={"use_hive": True})
+    print("✅ Loaded data using Feature View (Hive)")
 except Exception as e:
-    print(f"⚠️ Feature View failed (normal in GitHub Actions): {str(e)[:100]}")
-    print("🔄 Switching to Feature Group direct read...")
+    print(f"⚠️ Feature View failed: {str(e)[:100]}")
+    print("🔄 Switching to Feature Group direct read (Hive)...")
     
-    # Fallback: Read from Feature Group (works in GitHub Actions)
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
-    df = fg.read()
-    print(f"✅ Loaded {len(df)} records from Feature Group")
+    # Explicitly telling the engine NOT to use the online/flight service
+    df = fg.read(read_options={"use_hive": True})
+    print(f"✅ Loaded {len(df)} records from Feature Group (Hive)")
 
 # Ensure data directory exists
 os.makedirs('data', exist_ok=True)

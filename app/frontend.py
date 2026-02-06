@@ -169,46 +169,62 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-    # === STEP 2: REAL-TIME DATA FROM HOPSWORKS ===
-    with st.spinner("📊 Fetching real-time data from Hopsworks..."):
+    # === STEP 2: DATA LOADING (File + Hopsworks Fallback) ===
+    with st.spinner("📊 Loading forecast data..."):
         df = None
         
-        # === USER'S WORKING METHOD: Try Feature View then Feature Group ===
-        try:
-            st.info("🔍 Attempting user's proven method...")
-            
-            # Method 1: Try Feature View first (might work in some environments)
-            try:
-                st.info("Trying Feature View...")
-                fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
-                df = fv.get_batch_data()
-                
-                if df is not None and not df.empty:
-                    st.success(f"✅ Loaded {len(df)} records using Feature View!")
-                else:
-                    raise ValueError("Empty from feature view")
-                    
-            except Exception as fv_error:
-                st.info(f"⚠️ Feature View failed: {str(fv_error)[:100]}")
-                st.info("🔄 Switching to Feature Group direct read...")
-                
-                # Method 2: Direct Feature Group read (user's working fallback)
-                fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
-                st.info(f"✅ Feature Group found: {fg.name} v{fg.version}")
-                
-                # Simple read without any complex options
-                st.info("📥 Reading data with simple fg.read()...")
-                df = fg.read()
-                
-                if df is not None and not df.empty:
-                    st.success(f"✅ SUCCESS! Loaded {len(df)} records using simple fg.read()!")
-                else:
-                    raise ValueError("Empty result from fg.read()")
+        # === PRIORITY 1: Read from synced CSV file (updated hourly by GitHub Action) ===
+        local_file = "data/forecast_data.csv"
         
-        except Exception as e:
-            st.error(f"❌ User's method also failed: {str(e)[:200]}")
-            st.error("This means the Query Service is completely blocking access")
-            return None, best_model_obj, leaderboard
+        if os.path.exists(local_file):
+            try:
+                st.info(f"📂 Reading from synced data file...")
+                df = pd.read_csv(local_file)
+                
+                if df is not None and not df.empty:
+                    st.success(f"✅ Loaded {len(df)} records from auto-synced file!")
+                    st.info("💡 Data auto-updates hourly via GitHub Action")
+                else:
+                    raise ValueError("Empty file")
+                    
+            except Exception as file_error:
+                st.warning(f"⚠️ File read failed: {str(file_error)[:100]}")
+                df = None
+        
+        # === PRIORITY 2: Try direct Hopsworks access (will likely fail) ===
+        if df is None or df.empty:
+            st.info("🔄 No local file found - attempting Hopsworks direct access...")
+            
+            try:
+                # Try Feature View first
+                try:
+                    fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
+                    df = fv.get_batch_data()
+                    st.success(f"✅ Loaded {len(df)} records from Feature View!")
+                except:
+                    # Fallback to Feature Group
+                    fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+                    df = fg.read()
+                    st.success(f"✅ Loaded {len(df)} records from Feature Group!")
+                    
+            except Exception as hops_error:
+                st.error(f"❌ Hopsworks Query Service blocking access: {str(hops_error)[:150]}")
+                st.error("🚫 **Setup Required**: Enable GitHub Action for hourly data sync")
+                
+                with st.expander("📋 Setup Instructions"):
+                    st.markdown("""
+                    ### Enable Automated Data Sync:
+                    
+                    1. **Add GitHub Secret**: Go to repo Settings → Secrets → Add `MY_HOPSWORK_KEY`
+                    2. **Enable Workflow**: The `.github/workflows/sync_hopsworks_data.yml` will auto-run hourly
+                    3. **Manual Trigger**: Go to Actions tab → "Sync Hopsworks Data" → Run workflow
+                    4. **Wait**: First run creates `data/forecast_data.csv`
+                    5. **Refresh**: Dashboard will load data automatically
+                    
+                    This bypasses Query Service incompatibility completely!
+                    """)
+                
+                return None, best_model_obj, leaderboard
 
         # Process the dataframe if we got it
         if df is not None and not df.empty:

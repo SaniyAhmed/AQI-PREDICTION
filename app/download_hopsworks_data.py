@@ -15,7 +15,7 @@ print("📥 Fetching forecast data...")
 
 # Try Feature View first, fallback to Feature Group
 try:
-    fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
+    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
     df = fv.get_batch_data()
     print(f"✅ Loaded {len(df)} records from Feature View")
 except Exception as e:

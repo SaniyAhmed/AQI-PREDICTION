@@ -15,7 +15,7 @@ The project follows a modular MLOps lifecycle managed via **GitHub Actions** and
 | :--- | :--- |
 | **Language** | Python 3.x |
 | **Feature Store** | Hopsworks |
-| **ML Models** | Scikit-learn, XGBoost |
+| **ML Models** | Scikit-learn, XGBoost, SVR, RandomForest |
 | **Orchestration** | GitHub Actions (CI/CD) |
 | **Dashboard** | Streamlit & Flask |
 | **Explainability** | SHAP |
@@ -27,6 +27,7 @@ The project follows a modular MLOps lifecycle managed via **GitHub Actions** and
 
 ## 📂 Project Structure
 * `app/`: Streamlit frontend and Flask backend logic.
+* `data/`: Contains raw and processed data 
 * `notebooks/`: Exploratory Data Analysis (EDA) and model prototyping.
 * `pipelines/`: Automation scripts for data ingestion and training.
 * `docs/`: Full technical project report.

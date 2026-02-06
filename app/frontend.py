@@ -1,45 +1,38 @@
 import streamlit as st
-import requests
 import pandas as pd
 import plotly.express as px
 import time
+import hopsworks
+import joblib
+import os
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
-# --- CUSTOM CSS (THE "BIGGER IS BETTER" OVERHAUL) ---
+# --- CUSTOM CSS (STRICTLY PRESERVED) ---
 st.markdown("""
     <style>
-    /* 1. FORCE APP TO OCCUPY 98% OF THE SCREEN WIDTH */
     .block-container {
         max-width: 98% !important;
-        padding-top: 3rem !important; /* Increased from 1rem to move content down */
+        padding-top: 3rem !important; 
         padding-bottom: 0rem !important;
         padding-left: 2rem !important;
         padding-right: 2rem !important;
     }
-
-    /* 2. MEGA TITLES */
     .main-title { 
         font-size: 95px !important; 
         font-weight: 900; 
         color: #ffffff; 
         line-height: 1.1; 
-        margin-top: 20px !important; /* Extra safety margin for the top heading */
+        margin-top: 20px !important; 
         margin-bottom: 0px; 
     }
     .sub-title { font-size: 42px !important; color: #00d4ff; margin-bottom: 40px; }
-    
-    /* 3. MASSIVE METRICS */
     div[data-testid="stMetricValue"] { font-size: 90px !important; font-weight: bold; color: #00d4ff !important; }
     div[data-testid="stMetricLabel"] { font-size: 34px !important; color: #ffffff !important; font-weight: 600 !important; }
     .stMetric { background-color: #1E1E1E; padding: 40px !important; border-radius: 20px; border: 3px solid #444; }
-    
-    /* 4. HUGE HEADERS */
     .big-header { font-size: 65px !important; font-weight: 800 !important; color: #00d4ff !important; margin-bottom: 30px !important; display: block; }
     .medium-header { font-size: 48px !important; font-weight: 700 !important; color: #ffffff !important; margin-bottom: 25px !important; display: block; }
-    
-    /* 5. GIGANTIC LOGIC TEXT */
     .logic-text { 
         font-size: 34px !important; 
         line-height: 1.6 !important; 
@@ -50,8 +43,6 @@ st.markdown("""
         border-radius: 20px;
         border-left: 15px solid #00d4ff;
     }
-    
-    /* 6. CUSTOM BIG TABLE STYLING */
     .giant-table {
         width: 100%;
         border-collapse: collapse;
@@ -78,8 +69,6 @@ st.markdown("""
         color: #00ffcc;
         font-weight: bold;
     }
-
-    /* 7. REGISTRY PATH BOX */
     .registry-path { 
         font-size: 32px !important; 
         font-family: 'Courier New', monospace; 
@@ -91,8 +80,6 @@ st.markdown("""
         margin-top: 30px;
         text-align: center;
     }
-
-    /* 8. CHART & MAP SIZE */
     .stPlotlyChart { height: 700px !important; }
     iframe { height: 700px !important; }
     </style>
@@ -101,26 +88,73 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-BACKEND_URL = "http://localhost:5000"
+# --- DIRECT HOPSWORKS DATA FETCHING (THE MERGE) ---
+@st.cache_data(ttl=3600)
+def fetch_hopsworks_data():
+    try:
+        # Pull key from Streamlit Secrets
+        api_key = st.secrets["MY_HOPSWORK_KEY"]
+        project = hopsworks.login(api_key_value=api_key)
+        fs = project.get_feature_store()
+        mr = project.get_model_registry()
 
-try:
-    t_stamp = time.time()
-    m_res = requests.get(f"{BACKEND_URL}/model-metrics?t={t_stamp}").json()
-    f_res = requests.get(f"{BACKEND_URL}/forecast?t={t_stamp}").json()
-    
-    df = pd.DataFrame(f_res)
-    df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
-    df = df.sort_values('prediction_timestamp')
+        # 1. Get Leaderboard & Champion info
+        model_types = ["karachi_aqi_randomforest", "karachi_aqi_xgboost", "karachi_aqi_svr"]
+        leaderboard = []
+        best_model_obj = None
+        lowest_rmse = float('inf')
 
-    winner = m_res.get('winner_name', 'Unknown')
-    rmse = m_res.get('test_rmse', 0.0)
-    version = m_res.get('version', 'N/A')
-    leaderboard = m_res.get('leaderboard', [])
+        for m_name in model_types:
+            try:
+                versions = mr.get_models(m_name)
+                if versions:
+                    versions.sort(key=lambda x: x.version, reverse=True)
+                    latest = versions[0]
+                    metrics = getattr(latest, "training_metrics", getattr(latest, "metrics", {}))
+                    curr_rmse = float(metrics.get('test_rmse', 999.0))
+                    
+                    leaderboard.append({
+                        "Model": m_name.replace("karachi_aqi_", "").title(),
+                        "RMSE": round(curr_rmse, 4),
+                        "RawName": latest.name
+                    })
+                    
+                    if curr_rmse < lowest_rmse:
+                        lowest_rmse = curr_rmse
+                        best_model_obj = latest
+            except:
+                continue
+
+        # Mark Champion
+        for item in leaderboard:
+            item["Status"] = "Champion" if item["RawName"] == best_model_obj.name else "Challenger"
+
+        # 2. Get Forecast Data
+        fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
+        df = fg.read(read_options={"use_hive": False})
+        df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
+        df = df.sort_values('prediction_timestamp')
+
+        return df, best_model_obj, leaderboard
+
+    except Exception as e:
+        st.error(f"❌ Connection Error: {e}")
+        return None, None, []
+
+# --- EXECUTE DATA FETCH ---
+df, best_model_obj, leaderboard = fetch_hopsworks_data()
+
+if df is not None and best_model_obj is not None:
+    # Prepare metrics
+    winner = best_model_obj.name.replace("karachi_aqi_", "").replace("_", " ").title()
+    version = best_model_obj.version
+    m_metrics = getattr(best_model_obj, "training_metrics", getattr(best_model_obj, "metrics", {}))
+    rmse = float(m_metrics.get('test_rmse', 0.0))
     
     current_aqi = round(df["predicted_aqi"].iloc[0], 1)
     avg_72h_aqi = round(df["predicted_aqi"].mean(), 1)
 
-    # 3. TOP KPI ROW
+    # --- TOP KPI ROW (PRESERVED) ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Current AQI", f"{current_aqi}")
@@ -133,9 +167,8 @@ try:
 
     st.divider()
 
-    # 4. MAP & CHART ROW
+    # --- MAP & CHART ROW (PRESERVED) ---
     left_col, right_col = st.columns([1, 2], gap="large")
-
     with left_col:
         st.markdown('<span class="medium-header">📍 Monitoring Station</span>', unsafe_allow_html=True)
         map_data = pd.DataFrame({'lat': [24.8607], 'lon': [67.0011]})
@@ -153,7 +186,7 @@ try:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # 5. THE BOTTOM PART (Custom HTML Table for Massive Visibility)
+    # --- BOTTOM PART (PRESERVED) ---
     st.divider()
     logic_col, table_col = st.columns([1.2, 1], gap="large")
 
@@ -174,20 +207,15 @@ try:
     with table_col:
         st.markdown('<span class="big-header">🏆 Tournament Result</span>', unsafe_allow_html=True)
         if leaderboard:
-            # BUILDING CUSTOM HTML TABLE
             table_html = '<table class="giant-table"><thead><tr><th>Model</th><th>RMSE</th><th>Status</th></tr></thead><tbody>'
             for row in sorted(leaderboard, key=lambda x: x['RMSE']):
                 status_class = 'class="champion-row"' if row['Status'] == 'Champion' else ''
                 table_html += f'<tr {status_class}><td>{row["Model"]}</td><td>{row["RMSE"]}</td><td>{row["Status"]}</td></tr>'
             table_html += '</tbody></table>'
-            
             st.markdown(table_html, unsafe_allow_html=True)
             st.markdown(f'<div class="registry-path">Registry Path: v{version}</div>', unsafe_allow_html=True)
 
-except Exception as e:
-    st.error(f"Backend Sync Error: {e}")
-
-# Sidebar
+# Sidebar (PRESERVED)
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1684/1684375.png", width=150)
 st.sidebar.title("Sentinel Controls")
 if st.sidebar.button("♻️ Force Registry Resync"):

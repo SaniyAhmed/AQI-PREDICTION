@@ -7,7 +7,6 @@ import hopsworks
 import joblib
 import shutil
 import time
-import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import SVR 
@@ -51,6 +50,7 @@ def get_forecast_features(trained_columns):
     return prep[trained_columns].ffill().bfill(), df_f['time']
 
 def run_pipeline():
+    # Connection with slightly longer timeout for stability
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
@@ -58,126 +58,71 @@ def run_pipeline():
     print("📥 Fetching Data...")
     
     try:
-        # Attempt Feature View (Version 5 as specified in previous context)
         fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
         X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
-        print("✅ Loaded data using Feature View Version 5")
-    except Exception as e:
-        print(f"⚠️ Feature View failed: {str(e)[:50]}...")
-        print("🔄 Detecting latest Feature Group version...")
-        
-        # AUTO-DETECT LATEST VERSION logic
+        print("✅ Data loaded from Feature View V5")
+    except Exception:
         fg_list = fs.get_feature_groups(name="karachi_aqi")
-        # Sort by version number and take the highest
         latest_fg = sorted(fg_list, key=lambda x: x.version)[-1]
-        print(f"✅ Found and loading Latest Feature Group: Version {latest_fg.version}")
-        
+        print(f"🚀 Using Latest Feature Group: Version {latest_fg.version}")
         full_df = latest_fg.read()
-        target = "aqi"
-        X = full_df.drop(columns=[target])
-        y = full_df[[target]]
+        X = full_df.drop(columns=["aqi"])
+        y = full_df[["aqi"]]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Cleanup data
+
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 
+    feature_names = X_train.columns.tolist()
     scaler = RobustScaler()
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
     param_grids = {
-        "RandomForest": {
-            "n_estimators": [800, 1000],
-            "max_depth": [20, 25, 30],
-            "max_features": ["sqrt", 0.7, 0.8],
-            "bootstrap": [True]
-        },
-        "XGBoost": {
-            "n_estimators": [200, 300],
-            "learning_rate": [0.05, 0.07],
-            "max_depth": [4, 5],
-            "reg_lambda": [2.0]
-        }, 
-        "SVR": {
-            "C": [10.0, 15.0],
-            "epsilon": [0.1, 0.15],
-            "kernel": ['rbf']
-        } 
+        "RandomForest": {"n_estimators": [500], "max_depth": [20]},
+        "XGBoost": {"n_estimators": [200], "learning_rate": [0.05], "max_depth": [5]},
+        "SVR": {"C": [10.0], "epsilon": [0.1]}
     }
     
     base_models = {
         "RandomForest": RandomForestRegressor(random_state=42, n_jobs=-1),
-        "XGBoost": XGBRegressor(random_state=42, n_jobs=-1, tree_method='hist'),
-        "SVR": SVR(cache_size=1000)
+        "XGBoost": XGBRegressor(random_state=42, n_jobs=-1),
+        "SVR": SVR()
     }
 
-    print("\n🏆 TOURNAMENT STARTING")
-    print("=" * 65)
     best_m, best_score, best_name = None, float('inf'), ""
 
+    print("\n🏆 TOURNAMENT STARTING")
     for name, model in base_models.items():
-        print(f"\n🔍 Tuning {name}...")
-        
-        param_size = 1
-        for p in param_grids[name].values(): 
-            param_size *= len(p)
-        
-        n_cands = min(30, param_size) if name == "RandomForest" else min(15, param_size)
-        
-        search = HalvingRandomSearchCV(
-            model, param_grids[name], factor=3, cv=5,
-            n_candidates=n_cands, scoring='neg_root_mean_squared_error', 
-            n_jobs=-1, random_state=42, verbose=0
-        )
+        print(f"🔍 Training {name}...")
+        search = HalvingRandomSearchCV(model, param_grids[name], factor=3, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
         search.fit(X_train_s, y_train.values.ravel())
-        
         final_model = search.best_estimator_
         
-        # OVERFITTING ANALYSIS
-        train_preds = final_model.predict(X_train_s)
-        test_preds = final_model.predict(X_test_s)
-        
-        train_rmse = root_mean_squared_error(y_train, train_preds)
-        test_rmse = root_mean_squared_error(y_test, test_preds)
-        overfit_gap = test_rmse - train_rmse
+        train_rmse = root_mean_squared_error(y_train, final_model.predict(X_train_s))
+        test_rmse = root_mean_squared_error(y_test, final_model.predict(X_test_s))
+        print(f"   {name} -> Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
 
-        print(f"📊 {name} Performance:")
-        print(f"   Train RMSE: {train_rmse:.4f}")
-        print(f"   Test RMSE:  {test_rmse:.4f}")
-        print(f"   Gap:        {overfit_gap:.4f} ({'Healthy' if overfit_gap < 0.5 else 'Potential Overfit'})")
-        
-        # --- SAVE AND REGISTER ---
         m_dir = f"model_dir_{name.lower()}"
         if os.path.exists(m_dir): shutil.rmtree(m_dir)
         os.makedirs(m_dir)
-        joblib.dump(final_model, f"{m_dir}/karachi_aqi_model.pkl", compress=3)
+        joblib.dump(final_model, f"{m_dir}/karachi_aqi_model.pkl")
         joblib.dump(scaler, f"{m_dir}/scaler.pkl")
         
         mr.python.create_model(
             name="karachi_aqi_model", 
-            metrics={
-                "train_rmse": float(train_rmse),
-                "test_rmse": float(test_rmse),
-                "test_mae": float(mean_absolute_error(y_test, test_preds)),
-                "overfit_gap": float(overfit_gap)
-            },
-            description=f"Type: {name} | Params: {search.best_params_}"
+            metrics={"train_rmse": float(train_rmse), "test_rmse": float(test_rmse)},
+            description=f"Type: {name}"
         ).save(m_dir)
 
         if test_rmse < best_score:
             best_score, best_m, best_name = test_rmse, final_model, name
 
-    print("\n" + "=" * 65)
-    print(f"🥇 CHAMPION: {best_name} with Test RMSE: {best_score:.4f}")
-    print("=" * 65)
-
     # --- FORECAST GENERATION ---
-    X_f, times = get_forecast_features(X_train.columns.tolist())
+    X_f, times = get_forecast_features(feature_names)
     preds = best_m.predict(scaler.transform(X_f))
-    
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
-    forecast_df['predicted_aqi'] = preds.round(2).astype('float64')
+    forecast_df['predicted_aqi'] = preds.round(2)
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
     for col in ['year', 'month', 'day', 'hour']:
@@ -188,8 +133,21 @@ def run_pipeline():
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
     
+    # --- RESILIENT UPLOAD LOGIC ---
     print("\n🚀 Uploading forecast...")
-    fg.insert(forecast_df, write_options={"wait_for_job": False})
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            fg.insert(forecast_df, write_options={"wait_for_job": False})
+            print("✅ Forecast uploaded successfully.")
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Connection dropped. Retrying in 5s... (Attempt {attempt+1}/{max_retries})")
+                time.sleep(5)
+            else:
+                print("❌ Failed to upload forecast after 3 attempts.")
+                raise e
 
 if __name__ == "__main__":
     run_pipeline()

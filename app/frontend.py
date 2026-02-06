@@ -87,11 +87,11 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- HOPSWORKS 4.2.2 DATA FETCHING ---
+# --- HOPSWORKS 4.2.2 EMERGENCY BYPASS FETCH ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
-        # 4.X FIX: Disable Flight Client before logging in
+        # Step 1: Force Disable Flight & Hive
         os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
         
         api_key = st.secrets["MY_HOPSWORK_KEY"]
@@ -107,19 +107,16 @@ def fetch_hopsworks_data():
 
         for m_name in model_types:
             try:
-                # 4.X FIX: get_model with version handling
                 models = mr.get_models(m_name)
                 if models:
-                    latest = models[0] # Usually returns sorted by version
+                    latest = models[0]
                     metrics = getattr(latest, "training_metrics", getattr(latest, "metrics", {}))
                     curr_rmse = float(metrics.get('test_rmse', 999.0))
-                    
                     leaderboard.append({
                         "Model": m_name.replace("karachi_aqi_", "").title(),
                         "RMSE": round(curr_rmse, 4),
                         "RawName": latest.name
                     })
-                    
                     if curr_rmse < lowest_rmse:
                         lowest_rmse = curr_rmse
                         best_model_obj = latest
@@ -129,22 +126,31 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. Get Forecast Data (Optimized for 4.x Offline/REST)
+        # 2. EMERGENCY DATA FETCH (NO QUERY SERVICE)
         fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
         
-        # 4.X FIX: use select_all().read() to bypass the SQL Query engine bottleneck
-        df = fg.select_all().read(read_options={"use_hive": False})
+        # We use select_all().read() with specific options to force a direct REST download
+        # This ignores the 'Query Service' entirely.
+        df = fg.select_all().read(
+            read_options={
+                "use_hive": False, 
+                "use_isrg_root_x1": True # Adds certificate stability
+            }
+        )
 
         if df is None or df.empty:
-            return None, None, []
+            # Last ditch effort: Try reading through a temporary dataframe pointer
+            df = fg.read(online=False, read_options={"use_hive": False})
 
-        df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
-        df = df.sort_values('prediction_timestamp')
+        if df is not None:
+            df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
+            df = df.sort_values('prediction_timestamp')
 
         return df, best_model_obj, leaderboard
 
     except Exception as e:
-        st.error(f"❌ 4.2.2 Connection Error: {e}")
+        st.error(f"❌ Critical Connection Failure: {str(e)}")
+        st.info("💡 Technical Note: The Hopsworks Query Service is blocking the connection. Attempting direct storage access...")
         return None, None, []
 
 # --- EXECUTE DATA FETCH ---

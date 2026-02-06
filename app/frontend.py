@@ -169,10 +169,11 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-    # === STEP 2: DIRECT STORAGE ACCESS (BYPASS QUERY SERVICE) ===
-    with st.spinner("📊 Loading forecast data directly from storage..."):
+    # === STEP 2: REAL-TIME DATA FROM HOPSWORKS (REST API ONLY) ===
+    with st.spinner("📊 Fetching real-time data from Hopsworks..."):
         df = None
         
+        # Get feature group
         try:
             fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
             st.info(f"✅ Feature Group found: {fg.name} v{fg.version}")
@@ -187,13 +188,24 @@ def fetch_hopsworks_data():
             import requests
             import json
             
-            # Get connection details from the project object
-            # The project object has the host URL and we already have the API key
-            host = project._client._base_url
+            # Get connection details - compatible with Hopsworks 4.2.2
+            # Try multiple ways to get the host URL
+            try:
+                # Method 1: From feature store object
+                host = fs._feature_store_api._client._base
+            except:
+                try:
+                    # Method 2: Build from project info
+                    host = f"https://c.app.hopsworks.ai"
+                except:
+                    # Method 3: Get from any available API object
+                    host = "https://c.app.hopsworks.ai:443"
+            
             project_name = project.name
+            project_id = project.id
             
             st.info(f"📡 Connecting to: {host}")
-            st.info(f"📦 Project: {project_name}")
+            st.info(f"📦 Project: {project_name} (ID: {project_id})")
             st.info(f"🗂️ Feature Group: {fg.name} v{fg.version}")
             
             # Construct headers with API key
@@ -211,7 +223,7 @@ def fetch_hopsworks_data():
                 fs_id = fs.id
                 
                 # Endpoint to get feature group details including storage location
-                fg_details_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs_id}/featuregroups/{fg_id}"
+                fg_details_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs_id}/featuregroups/{fg_id}"
                 
                 response = requests.get(fg_details_url, headers=headers)
                 
@@ -225,7 +237,7 @@ def fetch_hopsworks_data():
                     
                     # Now try to read the actual data using the query endpoint
                     # This is a different endpoint that might work
-                    query_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs_id}/query"
+                    query_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs_id}/query"
                     
                     # Create a simple query payload
                     query_payload = {
@@ -262,7 +274,7 @@ def fetch_hopsworks_data():
                     st.info("🔍 Method 2: Direct SQL execution...")
                     
                     # Try the storage/query endpoint
-                    sql_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs.id}/storageconnectors/HOPSFS_CONNECTOR/query"
+                    sql_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/storageconnectors/HOPSFS_CONNECTOR/query"
                     
                     sql_payload = {
                         "query": f"SELECT * FROM `{project_name}_featurestore`.`{fg.name}_{fg.version}` LIMIT 1000"
@@ -290,7 +302,7 @@ def fetch_hopsworks_data():
                     st.info("🔍 Method 3: Getting data from statistics/preview endpoint...")
                     
                     # Many Hopsworks versions have a preview/sample endpoint
-                    preview_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/preview"
+                    preview_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/preview"
                     
                     preview_response = requests.get(
                         preview_url, 
@@ -331,7 +343,7 @@ def fetch_hopsworks_data():
                     st.info("🔍 Method 4: Trying commit data endpoint...")
                     
                     # Try to get the latest commit
-                    commits_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/commits"
+                    commits_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/commits"
                     
                     commits_response = requests.get(commits_url, headers=headers)
                     
@@ -340,7 +352,7 @@ def fetch_hopsworks_data():
                         st.info(f"📊 Found commits data")
                         
                         # If we have commit info, try to read the data
-                        read_url = f"{host}/hopsworks-api/api/project/{project.id}/featurestores/{fs.id}/featuregroups/{fg.id}/read"
+                        read_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/read"
                         
                         read_response = requests.get(
                             read_url,

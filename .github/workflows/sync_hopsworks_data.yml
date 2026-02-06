@@ -1,0 +1,36 @@
+name: Sync Hopsworks Data
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Every hour
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install hopsworks pandas
+      
+      - name: Download data from Hopsworks
+        env:
+          HOPSWORKS_API_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
+        run: python scripts/download_hopsworks_data.py
+      
+      - name: Commit and push changes
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add data/forecast_data.csv
+          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update forecast data [skip ci]"
+          git push

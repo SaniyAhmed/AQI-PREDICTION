@@ -313,24 +313,56 @@ def fetch_hopsworks_data():
                     if preview_response.status_code == 200:
                         data = preview_response.json()
                         
-                        # Different response formats possible
+                        # DEBUG: Show what we received
+                        st.info(f"📥 Response type: {type(data)}")
                         if isinstance(data, dict):
-                            if 'items' in data:
-                                df = pd.DataFrame(data['items'])
-                            elif 'data' in data:
-                                df = pd.DataFrame(data['data'])
-                            elif 'rows' in data:
-                                df = pd.DataFrame(data['rows'])
-                            else:
-                                # Try to use the dict directly
-                                df = pd.DataFrame([data])
-                        elif isinstance(data, list):
+                            st.info(f"📋 Response keys: {list(data.keys())[:10]}")
+                        
+                        # Try multiple ways to extract the data
+                        df = None
+                        
+                        # Format 1: Paginated response with 'items'
+                        if isinstance(data, dict) and 'items' in data:
+                            st.info(f"✓ Found 'items' key with {len(data['items'])} records")
+                            df = pd.DataFrame(data['items'])
+                        
+                        # Format 2: Direct data array
+                        elif isinstance(data, dict) and 'data' in data:
+                            st.info(f"✓ Found 'data' key")
+                            df = pd.DataFrame(data['data'])
+                        
+                        # Format 3: Rows array
+                        elif isinstance(data, dict) and 'rows' in data:
+                            st.info(f"✓ Found 'rows' key")
+                            df = pd.DataFrame(data['rows'])
+                        
+                        # Format 4: Count response (means we need different endpoint)
+                        elif isinstance(data, dict) and 'count' in data:
+                            count = data.get('count', 0)
+                            st.info(f"📊 Feature group has {count} total records")
+                            # Try to get actual data if count > 0
+                            if count > 0:
+                                # Try without limit to get storage path
+                                raise ValueError(f"Got count response ({count} records), need to use different endpoint")
+                        
+                        # Format 5: List response
+                        elif isinstance(data, list) and len(data) > 0:
+                            st.info(f"✓ Got list with {len(data)} items")
                             df = pd.DataFrame(data)
+                        
+                        # Format 6: Single dict record
+                        elif isinstance(data, dict) and len(data) > 0:
+                            st.info(f"✓ Got single record dict, converting to DataFrame")
+                            df = pd.DataFrame([data])
+                        
+                        else:
+                            st.warning(f"⚠️ Unknown response format: {str(data)[:200]}")
+                            raise ValueError(f"Unrecognized response format")
                         
                         if df is not None and not df.empty:
                             st.success(f"✅ Method 3: Retrieved {len(df)} records!")
                         else:
-                            raise ValueError("Empty preview data")
+                            raise ValueError("DataFrame is empty after parsing")
                     else:
                         raise ValueError(f"Preview failed: {preview_response.status_code} - {preview_response.text[:200]}")
                         

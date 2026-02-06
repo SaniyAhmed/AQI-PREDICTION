@@ -210,13 +210,13 @@ def fetch_hopsworks_data():
                 
                 # Try to get existing feature view or create new one
                 try:
-                    fv = fs.get_feature_view(name="karachi_aqi_forecast_view", version=1)
+                    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
                 except:
                     # Create feature view if doesn't exist
                     query = fg.select_all()
                     fv = fs.create_feature_view(
-                        name="karachi_aqi_forecast_view",
-                        version=1,
+                        name="karachi_aqi_view",
+                        version=5,
                         query=query
                     )
                 

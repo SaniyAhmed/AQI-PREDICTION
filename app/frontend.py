@@ -9,7 +9,7 @@ import os
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
-# --- CUSTOM CSS (STRICTLY PRESERVED) ---
+# --- CUSTOM CSS (PRESERVED) ---
 st.markdown("""
     <style>
     .block-container {
@@ -87,11 +87,10 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- HOPSWORKS 4.2.2 EMERGENCY BYPASS FETCH ---
+# --- HOPSWORKS 4.2.2 FEATURE VIEW V5 FETCH ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
-        # Step 1: Force Disable Flight & Hive
         os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
         
         api_key = st.secrets["MY_HOPSWORK_KEY"]
@@ -99,7 +98,7 @@ def fetch_hopsworks_data():
         fs = project.get_feature_store()
         mr = project.get_model_registry()
 
-        # 1. Get Leaderboard & Champion info
+        # 1. Models & Leaderboard
         model_types = ["karachi_aqi_randomforest", "karachi_aqi_xgboost", "karachi_aqi_svr"]
         leaderboard = []
         best_model_obj = None
@@ -126,37 +125,35 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. EMERGENCY DATA FETCH (NO QUERY SERVICE)
-        fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
-        
-        # We use select_all().read() with specific options to force a direct REST download
-        # This ignores the 'Query Service' entirely.
-        df = fg.select_all().read(
-            read_options={
-                "use_hive": False, 
-                "use_isrg_root_x1": True # Adds certificate stability
-            }
-        )
-
-        if df is None or df.empty:
-            # Last ditch effort: Try reading through a temporary dataframe pointer
-            df = fg.read(online=False, read_options={"use_hive": False})
+        # 2. FEATURE VIEW V5 DATA READ
+        try:
+            # Explicitly targeting Version 5
+            fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
+            
+            # get_batch_data() is the most stable 4.x REST-based read method
+            df = fv.get_batch_data()
+        except Exception as fv_err:
+            st.error(f"❌ Feature View V5 Error: {fv_err}")
+            # Fallback to Feature Group if View fails
+            fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
+            df = fg.select_all().read(read_options={"use_hive": False})
 
         if df is not None:
+            # Standardize column names if Hopsworks changed them
+            df.columns = [c.lower() for c in df.columns]
             df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
             df = df.sort_values('prediction_timestamp')
 
         return df, best_model_obj, leaderboard
 
     except Exception as e:
-        st.error(f"❌ Critical Connection Failure: {str(e)}")
-        st.info("💡 Technical Note: The Hopsworks Query Service is blocking the connection. Attempting direct storage access...")
+        st.error(f"❌ 4.2.2 Connection Error: {str(e)}")
         return None, None, []
 
 # --- EXECUTE DATA FETCH ---
 df, best_model_obj, leaderboard = fetch_hopsworks_data()
 
-if df is not None and best_model_obj is not None:
+if df is not None and not df.empty and best_model_obj is not None:
     winner = best_model_obj.name.replace("karachi_aqi_", "").replace("_", " ").title()
     version = best_model_obj.version
     m_metrics = getattr(best_model_obj, "training_metrics", getattr(best_model_obj, "metrics", {}))
@@ -225,6 +222,8 @@ if df is not None and best_model_obj is not None:
             table_html += '</tbody></table>'
             st.markdown(table_html, unsafe_allow_html=True)
             st.markdown(f'<div class="registry-path">Registry Path: v{version}</div>', unsafe_allow_html=True)
+else:
+    st.warning("🔭 Sentinel is searching for data in Hopsworks (View V5)...")
 
 # Sidebar
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1684/1684375.png", width=150)

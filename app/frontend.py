@@ -87,11 +87,13 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- UPDATED DATA FETCHING (TARGETING OFFLINE STORE) ---
+# --- HOPSWORKS 4.2.2 DATA FETCHING ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
-        # Pull key from Streamlit Secrets
+        # 4.X FIX: Disable Flight Client before logging in
+        os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+        
         api_key = st.secrets["MY_HOPSWORK_KEY"]
         project = hopsworks.login(api_key_value=api_key)
         fs = project.get_feature_store()
@@ -105,10 +107,10 @@ def fetch_hopsworks_data():
 
         for m_name in model_types:
             try:
-                versions = mr.get_models(m_name)
-                if versions:
-                    versions.sort(key=lambda x: x.version, reverse=True)
-                    latest = versions[0]
+                # 4.X FIX: get_model with version handling
+                models = mr.get_models(m_name)
+                if models:
+                    latest = models[0] # Usually returns sorted by version
                     metrics = getattr(latest, "training_metrics", getattr(latest, "metrics", {}))
                     curr_rmse = float(metrics.get('test_rmse', 999.0))
                     
@@ -124,23 +126,16 @@ def fetch_hopsworks_data():
             except:
                 continue
 
-        # Mark Champion
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. Get Forecast Data (Bypassing Query Service)
+        # 2. Get Forecast Data (Optimized for 4.x Offline/REST)
         fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
         
-        # We explicitly use online=False to pull from the store we confirmed is populated
-        # use_hive=False ensures we use the simpler REST connection
-        try:
-            df = fg.read(online=False, read_options={"use_hive": False})
-        except:
-            st.warning("🔄 Standard read failed. Attempting fallback Select All...")
-            df = fg.select_all().read(online=False, read_options={"use_hive": False})
+        # 4.X FIX: use select_all().read() to bypass the SQL Query engine bottleneck
+        df = fg.select_all().read(read_options={"use_hive": False})
 
         if df is None or df.empty:
-            st.error("⚠️ Data was found in Hopsworks preview but the app is receiving an empty table.")
             return None, None, []
 
         df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
@@ -149,14 +144,13 @@ def fetch_hopsworks_data():
         return df, best_model_obj, leaderboard
 
     except Exception as e:
-        st.error(f"❌ Connection Error: {e}")
+        st.error(f"❌ 4.2.2 Connection Error: {e}")
         return None, None, []
 
 # --- EXECUTE DATA FETCH ---
 df, best_model_obj, leaderboard = fetch_hopsworks_data()
 
 if df is not None and best_model_obj is not None:
-    # Prepare metrics
     winner = best_model_obj.name.replace("karachi_aqi_", "").replace("_", " ").title()
     version = best_model_obj.version
     m_metrics = getattr(best_model_obj, "training_metrics", getattr(best_model_obj, "metrics", {}))

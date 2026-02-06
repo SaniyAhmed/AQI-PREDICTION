@@ -25,7 +25,7 @@ jobs:
       - name: Download data from Hopsworks
         env:
           HOPSWORKS_API_KEY: ${{ secrets.MY_HOPSWORK_KEY }}
-        run: python scripts/download_hopsworks_data.py
+        run: python app/download_hopsworks_data.py
       
       - name: Commit and push changes
         run: |

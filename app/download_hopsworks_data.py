@@ -1,46 +1,50 @@
 """
 Download forecast data from Hopsworks Feature Store
-This script runs in GitHub Actions to sync data hourly
+Forcing legacy read paths to avoid Arrow Flight Binder Errors
 """
 import os
+import pandas as pd
 
-# ✅ FORCE DISABLE FLIGHT CLIENT
+# Force disable experimental features
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import hopsworks
-import pandas as pd
 
 print("🔐 Logging into Hopsworks...")
+# Using the key from your secrets
 project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
 fs = project.get_feature_store()
 
 print("📥 Fetching Data...")
 
-# ✅ IMPLEMENTING THE FIX:
-# We use engine="hive" explicitly in the read calls to ensure 
-# it doesn't use the buggy Arrow Flight Query Service.
 try:
-    print("Trying Feature View with Hive engine...")
-    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-    # Using read() with engine="hive" is the most stable way in GitHub Actions
-    df = fv.get_batch_data(read_options={"use_hive": True})
-    print("✅ Loaded data using Feature View (Hive)")
-except Exception as e:
-    print(f"⚠️ Feature View failed: {str(e)[:100]}")
-    print("🔄 Switching to Feature Group direct read (Hive)...")
-    
+    # 1. Try reading from Feature Group directly - usually the most stable path
+    print("Reading from Feature Group 'karachi_aqi'...")
     fg = fs.get_feature_group(name="karachi_aqi", version=1)
-    # Explicitly telling the engine NOT to use the online/flight service
-    df = fg.read(read_options={"use_hive": True})
-    print(f"✅ Loaded {len(df)} records from Feature Group (Hive)")
+    
+    # .read() with no arguments is the standard fallback
+    # We bypass the Feature View to avoid the complex SQL join that is failing
+    df = fg.read()
+    
+    if df is None or df.empty:
+        raise ValueError("Dataframe is empty")
+        
+    print(f"✅ Successfully loaded {len(df)} records")
 
-# Ensure data directory exists
+except Exception as e:
+    print(f"❌ Primary read failed: {e}")
+    print("🔄 Attempting legacy SQL read...")
+    # 2. Final fallback: Direct SQL if the object-based read fails
+    query = "SELECT * FROM `karachi_aqi_1`"
+    df = fs.sql(query)
+    print("✅ Loaded data via direct SQL")
+
+# Create data directory
 os.makedirs('data', exist_ok=True)
 
 # Save to CSV
 output_path = 'data/forecast_data.csv'
 df.to_csv(output_path, index=False)
 
-print(f"💾 Saved data to {output_path}")
-print(f"📊 Total records: {len(df)}")
+print(f"💾 Saved {len(df)} rows to {output_path}")
 print("✅ Sync complete!")

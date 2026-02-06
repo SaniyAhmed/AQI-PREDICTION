@@ -408,6 +408,61 @@ def fetch_hopsworks_data():
                 except Exception as e4:
                     st.warning(f"⚠️ Method 4 failed: {str(e4)[:200]}")
             
+            # === METHOD 5: SDK Batch Data (OFFLINE STORAGE) ===
+            if df is None or df.empty:
+                try:
+                    st.info("🔍 Method 5: Accessing offline storage via SDK batch method...")
+                    st.info("💡 Online store is empty - fetching from offline storage")
+                    
+                    # The feature group has offline data - use batch/offline methods
+                    # Try to read directly with read_options that force offline
+                    try:
+                        # Most direct offline read
+                        df = fg.read(
+                            online=False,
+                            dataframe_type="default",
+                            read_options={"use_hive": False}
+                        )
+                        
+                        if df is not None and not df.empty:
+                            st.success(f"✅ Method 5a: Retrieved {len(df)} records from offline storage!")
+                        else:
+                            raise ValueError("Empty result")
+                            
+                    except Exception as e5a:
+                        st.info(f"Method 5a failed: {str(e5a)[:100]}")
+                        
+                        # Try getting via feature view batch data
+                        try:
+                            st.info("Trying feature view batch data...")
+                            
+                            # Create or get feature view for batch reading
+                            try:
+                                fv = fs.get_feature_view("karachi_aqi_view", version=1)
+                            except:
+                                # Create temporary view
+                                query = fg.select_all()
+                                fv = fs.create_feature_view(
+                                    name="temp_batch_view",
+                                    version=1,
+                                    query=query
+                                )
+                            
+                            # Get batch data (offline)
+                            df = fv.get_batch_data()
+                            
+                            if df is not None and not df.empty:
+                                st.success(f"✅ Method 5b: Retrieved {len(df)} records via feature view!")
+                            else:
+                                raise ValueError("Empty batch data")
+                                
+                        except Exception as e5b:
+                            st.warning(f"Method 5b failed: {str(e5b)[:100]}")
+                            raise ValueError("All offline access methods failed")
+                        
+                except Exception as e5:
+                    st.warning(f"⚠️ Method 5 failed: {str(e5)[:200]}")
+            
             # === Final check ===
             if df is None or df.empty:
                 st.error("❌ All REST API methods failed!")

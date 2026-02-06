@@ -3,6 +3,10 @@ Download forecast data from Hopsworks Feature Store
 This script runs in GitHub Actions to sync data hourly
 """
 import os
+
+# ✅ IMPLEMENTING WORKING LOGIC: Disable the buggy Flight Client before other imports
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+
 import hopsworks
 import pandas as pd
 

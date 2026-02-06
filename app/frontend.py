@@ -107,11 +107,11 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- MULTI-STRATEGY DATA FETCHING FUNCTION ---
+# --- ULTRA-DIRECT DATA FETCHING FUNCTION ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_hopsworks_data():
     """
-    Ultra-robust data fetching with 5 different fallback strategies
+    Direct Hopsworks access bypassing Query Service completely
     """
     with st.spinner("🔄 Connecting to Hopsworks Feature Store..."):
         try:
@@ -165,130 +165,186 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-    # === STEP 2: FETCH FORECAST DATA WITH MULTIPLE FALLBACKS ===
-    with st.spinner("📊 Loading forecast data..."):
+    # === STEP 2: DIRECT STORAGE ACCESS (BYPASS QUERY SERVICE) ===
+    with st.spinner("📊 Loading forecast data directly from storage..."):
         df = None
-        error_log = []
         
         try:
             fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
+            st.info(f"✅ Feature Group found: {fg.name} v{fg.version}")
         except Exception as e:
             st.error(f"❌ Cannot access feature group: {str(e)}")
             return None, best_model_obj, leaderboard
 
-        # === STRATEGY 1: Direct read with minimal options ===
+        # === METHOD 1: Get storage connector directly and read parquet files ===
         try:
-            st.info("🔍 Attempting Strategy 1: Direct read...")
-            df = fg.read(online=False, read_options={"use_hive": False})
+            st.info("🔍 Reading directly from Hopsworks storage layer...")
+            
+            # Access internal storage connector
+            storage_connector = fs.get_storage_connector("hopsfsconnector", "HOPSFS")
+            
+            # Get the feature group location
+            fg_location = fg._get_feature_group_url()
+            
+            st.info(f"📂 Storage location identified: {fg_location[:100]}...")
+            
+            # Try to read using the internal engine without Query Service
+            from hsfs.engine import python
+            engine = python.Engine()
+            
+            # Force offline read without query service
+            df = engine.read(
+                storage_connector,
+                data_format="parquet", 
+                read_options={}
+            )
+            
             if df is not None and not df.empty:
-                st.success("✅ Strategy 1 successful!")
+                st.success(f"✅ Successfully read {len(df)} records from storage!")
             else:
-                raise ValueError("Empty dataframe")
+                raise ValueError("Empty dataframe from storage")
+                
         except Exception as e1:
-            error_log.append(f"Strategy 1 failed: {str(e1)[:150]}")
-            st.warning(f"⚠️ Strategy 1 failed, trying alternative...")
-
-        # === STRATEGY 2: Select specific columns only ===
-        if df is None or df.empty:
+            st.warning(f"⚠️ Method 1 failed: {str(e1)[:200]}")
+            
+            # === METHOD 2: Use pandas to read parquet directly ===
             try:
-                st.info("🔍 Attempting Strategy 2: Select specific columns...")
-                df = fg.select(["prediction_timestamp", "predicted_aqi"]).read(
-                    read_options={"use_hive": False}
-                )
+                st.info("🔍 Attempting direct parquet file access...")
+                
+                # Get all parquet files from feature group
+                import pyarrow.parquet as pq
+                import pyarrow as pa
+                
+                # Try to access the feature group's underlying storage
+                fg_path = f"/apps/hive/warehouse/{project.name.lower()}_featurestore.db/{fg.name}_{fg.version}"
+                
+                st.info(f"📂 Trying path: {fg_path}")
+                
+                # This should work if we have direct file access
+                df = pd.read_parquet(fg_path)
+                
                 if df is not None and not df.empty:
-                    st.success("✅ Strategy 2 successful!")
+                    st.success(f"✅ Successfully read {len(df)} records via parquet!")
                 else:
-                    raise ValueError("Empty dataframe")
+                    raise ValueError("Empty dataframe from parquet")
+                    
             except Exception as e2:
-                error_log.append(f"Strategy 2 failed: {str(e2)[:150]}")
-                st.warning(f"⚠️ Strategy 2 failed, trying alternative...")
-
-        # === STRATEGY 3: Use Feature View ===
-        if df is None or df.empty:
-            try:
-                st.info("🔍 Attempting Strategy 3: Feature View...")
+                st.warning(f"⚠️ Method 2 failed: {str(e2)[:200]}")
                 
-                # Try to get existing feature view or create new one
+                # === METHOD 3: SQL Query with explicit dataframe engine ===
                 try:
-                    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-                except:
-                    # Create feature view if doesn't exist
-                    query = fg.select_all()
-                    fv = fs.create_feature_view(
-                        name="karachi_aqi_view",
-                        version=5,
-                        query=query
+                    st.info("🔍 Attempting SQL query with dataframe engine...")
+                    
+                    # Create a simple query without complex parsing
+                    query = fg.select(["prediction_timestamp", "predicted_aqi"])
+                    
+                    # Force to use pandas engine instead of Arrow/Flight
+                    df = query.read(
+                        dataframe_type="pandas",
+                        read_options={
+                            "use_hive": False,
+                            "external": False
+                        }
                     )
-                
-                df = fv.get_batch_data()
-                if df is not None and not df.empty:
-                    st.success("✅ Strategy 3 successful!")
-                else:
-                    raise ValueError("Empty dataframe")
-            except Exception as e3:
-                error_log.append(f"Strategy 3 failed: {str(e3)[:150]}")
-                st.warning(f"⚠️ Strategy 3 failed, trying alternative...")
+                    
+                    if df is not None and not df.empty:
+                        st.success(f"✅ Successfully queried {len(df)} records!")
+                    else:
+                        raise ValueError("Empty result from query")
+                        
+                except Exception as e3:
+                    st.warning(f"⚠️ Method 3 failed: {str(e3)[:200]}")
+                    
+                    # === METHOD 4: REST API Direct Call ===
+                    try:
+                        st.info("🔍 Attempting direct REST API call...")
+                        
+                        import requests
+                        
+                        # Get project and API details
+                        host = project._project_api._client._host
+                        project_id = project.id
+                        
+                        # Construct API endpoint
+                        api_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/preview"
+                        
+                        headers = {
+                            "Authorization": f"ApiKey {api_key}",
+                            "Content-Type": "application/json"
+                        }
+                        
+                        # Request preview data
+                        response = requests.get(
+                            api_url,
+                            headers=headers,
+                            params={"limit": 1000}
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            
+                            # Parse the preview data into dataframe
+                            if 'items' in data:
+                                df = pd.DataFrame(data['items'])
+                            elif isinstance(data, list):
+                                df = pd.DataFrame(data)
+                            else:
+                                # Try to extract data from response
+                                df = pd.DataFrame([data])
+                            
+                            if df is not None and not df.empty:
+                                st.success(f"✅ Successfully fetched {len(df)} records via REST API!")
+                            else:
+                                raise ValueError("No data in API response")
+                        else:
+                            raise ValueError(f"API returned status {response.status_code}")
+                            
+                    except Exception as e4:
+                        st.error(f"❌ All data access methods failed!")
+                        st.error(f"Final error: {str(e4)[:200]}")
+                        
+                        # Show detailed error information
+                        with st.expander("🔧 Detailed Error Log"):
+                            st.code(f"""
+Method 1 Error: {str(e1)[:300]}
 
-        # === STRATEGY 4: Direct Python API call ===
-        if df is None or df.empty:
-            try:
-                st.info("🔍 Attempting Strategy 4: Direct API call...")
-                
-                # Get storage connector and path
-                storage_connector = fg._feature_group_engine._online_fg_to_avro(fg)
-                
-                # Use low-level read
-                df = fg._feature_group_engine._read_from_storage_connector(
-                    storage_connector, 
-                    read_options={"use_hive": False}
-                )
-                
-                if df is not None and not df.empty:
-                    st.success("✅ Strategy 4 successful!")
-                else:
-                    raise ValueError("Empty dataframe")
-            except Exception as e4:
-                error_log.append(f"Strategy 4 failed: {str(e4)[:150]}")
-                st.warning(f"⚠️ Strategy 4 failed, trying final fallback...")
+Method 2 Error: {str(e2)[:300]}
 
-        # === STRATEGY 5: Create synthetic demo data ===
-        if df is None or df.empty:
-            st.warning("⚠️ All data fetching strategies failed. Using synthetic demo data...")
-            st.info("**Note:** This is demonstration data. Please check Hopsworks connection.")
-            
-            # Create demo data
-            import numpy as np
-            from datetime import datetime, timedelta
-            
-            base_time = datetime.now()
-            timestamps = [base_time + timedelta(hours=i) for i in range(72)]
-            
-            # Generate realistic AQI values
-            base_aqi = 120
-            aqi_values = [base_aqi + np.random.randint(-30, 40) for _ in range(72)]
-            
-            df = pd.DataFrame({
-                'prediction_timestamp': timestamps,
-                'predicted_aqi': aqi_values
-            })
-            
-            st.markdown('<div class="error-box"><b>⚠️ USING DEMO DATA</b><br>Connection issues encountered. Displaying sample forecasts.</div>', unsafe_allow_html=True)
+Method 3 Error: {str(e3)[:300]}
+
+Method 4 Error: {str(e4)[:300]}
+                            """)
+                        
+                        st.error("❌ Unable to fetch real data from Hopsworks")
+                        return None, best_model_obj, leaderboard
 
         # Process the dataframe
-        if df is not None:
+        if df is not None and not df.empty:
             try:
-                df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
-                df = df.sort_values('prediction_timestamp').reset_index(drop=True)
+                # Ensure timestamp column exists
+                if 'prediction_timestamp' in df.columns:
+                    df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
+                    df = df.sort_values('prediction_timestamp').reset_index(drop=True)
                 
-                # Ensure we have the required columns
-                if 'predicted_aqi' not in df.columns and 'aqi' in df.columns:
-                    df['predicted_aqi'] = df['aqi']
+                # Ensure AQI column exists
+                if 'predicted_aqi' not in df.columns:
+                    if 'aqi' in df.columns:
+                        df['predicted_aqi'] = df['aqi']
+                    elif 'pm25' in df.columns:
+                        # If only PM2.5 exists, we can estimate AQI
+                        df['predicted_aqi'] = df['pm25']  # Simplified
+                    else:
+                        st.error("❌ Cannot find AQI or PM2.5 columns in data")
+                        return None, best_model_obj, leaderboard
                     
                 st.success(f"✅ Successfully loaded {len(df)} forecast records")
                 
             except Exception as e:
                 st.error(f"❌ Error processing data: {str(e)}")
                 return None, best_model_obj, leaderboard
+        else:
+            st.error("❌ No data retrieved from any method")
+            return None, best_model_obj, leaderboard
 
         return df, best_model_obj, leaderboard
 

@@ -3,7 +3,7 @@ requests
 pytz
 
 # --- Hopsworks (minimal install) ---
-hopsworks==4.2.2
+hopsworks
 
 # --- Machine Learning & Modeling ---
 xgboost

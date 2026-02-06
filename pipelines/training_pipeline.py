@@ -11,13 +11,13 @@ import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error
+from sklearn.metrics import root_mean_squared_error
+from sklearn.model_selection import train_test_split
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
 def get_forecast_features(trained_columns, latest_actuals):
-    """Fetches weather forecast and seeds missing lag features with real latest data."""
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
@@ -63,14 +63,9 @@ def run_pipeline():
     latest_fg = sorted(fg_list, key=lambda x: x.version)[-1]
     full_df = latest_fg.read()
     
-    # --- PRINT CURRENT AQI ---
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
-    current_aqi = latest_actuals.get('aqi')
-    print("-" * 30)
-    print(f"📍 CURRENT AQI (Latest Record): {current_aqi:.2f}")
-    print(f"⏰ Recorded At: {int(latest_row['day'])}/{int(latest_row['month'])} - {int(latest_row['hour'])}:00")
-    print("-" * 30)
+    print(f"📍 CURRENT AQI (Latest Record): {latest_actuals.get('aqi'):.2f}")
 
     X = full_df.drop(columns=["aqi"])
     y = full_df[["aqi"]]
@@ -83,9 +78,10 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
+    # Note: Added 'reg:squarederror' to avoid base_score issues
     base_models = {
         "RandomForest": RandomForestRegressor(n_estimators=500, max_depth=20, random_state=42, n_jobs=-1),
-        "XGBoost": XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, random_state=42)
+        "XGBoost": XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, objective='reg:squarederror', random_state=42)
     }
 
     best_m, best_score, best_name = None, float('inf'), ""
@@ -98,17 +94,18 @@ def run_pipeline():
 
     print(f"\n🏆 CHAMPION MODEL: {best_name} (Test RMSE: {best_score:.4f})")
 
-    # --- FORECAST GENERATION & PRINTING ---
+    # --- FORECAST GENERATION ---
     X_f, times = get_forecast_features(feature_names, latest_actuals)
     preds = best_m.predict(scaler.transform(X_f))
     
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
-    forecast_df['predicted_aqi'] = preds.round(2)
+    
+    # CRITICAL FIX: Cast to float64 to match Hopsworks 'double' requirement
+    forecast_df['predicted_aqi'] = preds.astype('float64').round(2)
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("\n🔮 3-DAY AQI FORECAST (Next 72 Hours):")
+    print("\n🔮 3-DAY AQI FORECAST (Summary):")
     print("=" * 45)
-    # Print a summary (e.g., every 6 hours to keep it clean)
     summary_print = forecast_df.iloc[::6] 
     for _, row in summary_print.iterrows():
         print(f"📅 {row['prediction_timestamp']} | Predicted AQI: {row['predicted_aqi']:>6}")
@@ -119,9 +116,11 @@ def run_pipeline():
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
+    
+    # Insert with explicit schema check bypass if it still complains, 
+    # but the astype('float64') usually solves it!
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
-    print("✅ Forecast uploaded to Hopsworks Feature Store.")
+    print("✅ Forecast uploaded successfully.")
 
 if __name__ == "__main__":
-    from sklearn.model_selection import train_test_split
     run_pipeline()

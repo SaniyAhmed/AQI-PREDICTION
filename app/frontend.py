@@ -169,326 +169,48 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-    # === STEP 2: REAL-TIME DATA FROM HOPSWORKS (REST API ONLY) ===
+    # === STEP 2: REAL-TIME DATA FROM HOPSWORKS ===
     with st.spinner("📊 Fetching real-time data from Hopsworks..."):
         df = None
         
-        # Get feature group
+        # === USER'S WORKING METHOD: Try Feature View then Feature Group ===
         try:
-            fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
-            st.info(f"✅ Feature Group found: {fg.name} v{fg.version}")
-        except Exception as e:
-            st.error(f"❌ Cannot access feature group: {str(e)}")
-            return None, best_model_obj, leaderboard
-
-        # === BYPASS ALL SDK METHODS - USE PURE REST API ===
-        st.info("🔍 Bypassing SDK completely - using direct REST API calls...")
-        
-        try:
-            import requests
-            import json
+            st.info("🔍 Attempting user's proven method...")
             
-            # Get connection details - compatible with Hopsworks 4.2.2
-            # Try multiple ways to get the host URL
+            # Method 1: Try Feature View first (might work in some environments)
             try:
-                # Method 1: From feature store object
-                host = fs._feature_store_api._client._base
-            except:
-                try:
-                    # Method 2: Build from project info
-                    host = f"https://c.app.hopsworks.ai"
-                except:
-                    # Method 3: Get from any available API object
-                    host = "https://c.app.hopsworks.ai:443"
-            
-            project_name = project.name
-            project_id = project.id
-            
-            st.info(f"📡 Connecting to: {host}")
-            st.info(f"📦 Project: {project_name} (ID: {project_id})")
-            st.info(f"🗂️ Feature Group: {fg.name} v{fg.version}")
-            
-            # Construct headers with API key
-            headers = {
-                "Authorization": f"ApiKey {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            # === METHOD 1: Get Feature Group Data via Storage Connector API ===
-            try:
-                st.info("🔍 Method 1: Fetching via storage connector API...")
+                st.info("Trying Feature View...")
+                fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
+                df = fv.get_batch_data()
                 
-                # Get the feature group's storage connector info
-                fg_id = fg.id
-                fs_id = fs.id
-                
-                # Endpoint to get feature group details including storage location
-                fg_details_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs_id}/featuregroups/{fg_id}"
-                
-                response = requests.get(fg_details_url, headers=headers)
-                
-                if response.status_code == 200:
-                    fg_data = response.json()
-                    st.success(f"✅ Retrieved feature group metadata")
-                    
-                    # Try to get the location
-                    location = fg_data.get('location', '')
-                    st.info(f"📂 Storage location: {location[:100]}...")
-                    
-                    # Now try to read the actual data using the query endpoint
-                    # This is a different endpoint that might work
-                    query_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs_id}/query"
-                    
-                    # Create a simple query payload
-                    query_payload = {
-                        "query": f"SELECT * FROM {fg.name}_{fg.version}",
-                        "featurestore": fs.name
-                    }
-                    
-                    query_response = requests.post(query_url, headers=headers, json=query_payload)
-                    
-                    if query_response.status_code == 200:
-                        result = query_response.json()
-                        # Try to convert to dataframe
-                        if isinstance(result, dict) and 'data' in result:
-                            df = pd.DataFrame(result['data'])
-                        else:
-                            df = pd.DataFrame(result)
-                        
-                        if not df.empty:
-                            st.success(f"✅ Method 1: Retrieved {len(df)} records!")
-                        else:
-                            raise ValueError("Empty result")
-                    else:
-                        raise ValueError(f"Query failed: {query_response.status_code}")
+                if df is not None and not df.empty:
+                    st.success(f"✅ Loaded {len(df)} records using Feature View!")
                 else:
-                    raise ValueError(f"Cannot get FG details: {response.status_code}")
+                    raise ValueError("Empty from feature view")
                     
-            except Exception as e1:
-                st.warning(f"⚠️ Method 1 failed: {str(e1)[:200]}")
-                df = None
-            
-            # === METHOD 2: Direct SQL Execution Endpoint ===
-            if df is None or df.empty:
-                try:
-                    st.info("🔍 Method 2: Direct SQL execution...")
-                    
-                    # Try the storage/query endpoint
-                    sql_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/storageconnectors/HOPSFS_CONNECTOR/query"
-                    
-                    sql_payload = {
-                        "query": f"SELECT * FROM `{project_name}_featurestore`.`{fg.name}_{fg.version}` LIMIT 1000"
-                    }
-                    
-                    sql_response = requests.post(sql_url, headers=headers, json=sql_payload)
-                    
-                    if sql_response.status_code == 200:
-                        data = sql_response.json()
-                        df = pd.DataFrame(data)
-                        
-                        if not df.empty:
-                            st.success(f"✅ Method 2: Retrieved {len(df)} records!")
-                        else:
-                            raise ValueError("Empty result")
-                    else:
-                        raise ValueError(f"SQL query failed: {sql_response.status_code}")
-                        
-                except Exception as e2:
-                    st.warning(f"⚠️ Method 2 failed: {str(e2)[:200]}")
-            
-            # === METHOD 3: Feature Store Statistics Endpoint ===
-            if df is None or df.empty:
-                try:
-                    st.info("🔍 Method 3: Getting data from statistics/preview endpoint...")
-                    
-                    # Many Hopsworks versions have a preview/sample endpoint
-                    preview_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/preview"
-                    
-                    preview_response = requests.get(
-                        preview_url, 
-                        headers=headers,
-                        params={"limit": 100}  # Hopsworks max limit is 100
-                    )
-                    
-                    if preview_response.status_code == 200:
-                        data = preview_response.json()
-                        
-                        # DEBUG: Show what we received
-                        st.info(f"📥 Response type: {type(data)}")
-                        if isinstance(data, dict):
-                            st.info(f"📋 Response keys: {list(data.keys())[:10]}")
-                        
-                        # Try multiple ways to extract the data
-                        df = None
-                        
-                        # Format 1: Paginated response with 'items'
-                        if isinstance(data, dict) and 'items' in data:
-                            st.info(f"✓ Found 'items' key with {len(data['items'])} records")
-                            df = pd.DataFrame(data['items'])
-                        
-                        # Format 2: Direct data array
-                        elif isinstance(data, dict) and 'data' in data:
-                            st.info(f"✓ Found 'data' key")
-                            df = pd.DataFrame(data['data'])
-                        
-                        # Format 3: Rows array
-                        elif isinstance(data, dict) and 'rows' in data:
-                            st.info(f"✓ Found 'rows' key")
-                            df = pd.DataFrame(data['rows'])
-                        
-                        # Format 4: Count response (means we need different endpoint)
-                        elif isinstance(data, dict) and 'count' in data:
-                            count = data.get('count', 0)
-                            st.info(f"📊 Feature group has {count} total records")
-                            # Try to get actual data if count > 0
-                            if count > 0:
-                                # Try without limit to get storage path
-                                raise ValueError(f"Got count response ({count} records), need to use different endpoint")
-                        
-                        # Format 5: List response
-                        elif isinstance(data, list) and len(data) > 0:
-                            st.info(f"✓ Got list with {len(data)} items")
-                            df = pd.DataFrame(data)
-                        
-                        # Format 6: Single dict record
-                        elif isinstance(data, dict) and len(data) > 0:
-                            st.info(f"✓ Got single record dict, converting to DataFrame")
-                            df = pd.DataFrame([data])
-                        
-                        else:
-                            st.warning(f"⚠️ Unknown response format: {str(data)[:200]}")
-                            raise ValueError(f"Unrecognized response format")
-                        
-                        if df is not None and not df.empty:
-                            st.success(f"✅ Method 3: Retrieved {len(df)} records!")
-                        else:
-                            raise ValueError("DataFrame is empty after parsing")
-                    else:
-                        raise ValueError(f"Preview failed: {preview_response.status_code} - {preview_response.text[:200]}")
-                        
-                except Exception as e3:
-                    st.warning(f"⚠️ Method 3 failed: {str(e3)[:200]}")
-            
-            # === METHOD 4: Commit Data Endpoint ===
-            if df is None or df.empty:
-                try:
-                    st.info("🔍 Method 4: Trying commit data endpoint...")
-                    
-                    # Try to get the latest commit
-                    commits_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/commits"
-                    
-                    commits_response = requests.get(commits_url, headers=headers)
-                    
-                    if commits_response.status_code == 200:
-                        commits = commits_response.json()
-                        st.info(f"📊 Found commits data")
-                        
-                        # If we have commit info, try to read the data
-                        read_url = f"{host}/hopsworks-api/api/project/{project_id}/featurestores/{fs.id}/featuregroups/{fg.id}/read"
-                        
-                        read_response = requests.get(
-                            read_url,
-                            headers=headers,
-                            params={"limit": 100}  # Hopsworks max limit is 100
-                        )
-                        
-                        if read_response.status_code == 200:
-                            data = read_response.json()
-                            df = pd.DataFrame(data)
-                            
-                            if not df.empty:
-                                st.success(f"✅ Method 4: Retrieved {len(df)} records!")
-                            else:
-                                raise ValueError("Empty read result")
-                        else:
-                            raise ValueError(f"Read failed: {read_response.status_code}")
-                    else:
-                        raise ValueError(f"Commits endpoint failed: {commits_response.status_code}")
-                        
-                except Exception as e4:
-                    st.warning(f"⚠️ Method 4 failed: {str(e4)[:200]}")
-            
-            # === METHOD 5: SDK Batch Data (OFFLINE STORAGE) ===
-            if df is None or df.empty:
-                try:
-                    st.info("🔍 Method 5: Accessing offline storage via SDK batch method...")
-                    st.info("💡 Online store is empty - fetching from offline storage")
-                    
-                    # The feature group has offline data - use batch/offline methods
-                    # Try to read directly with read_options that force offline
-                    try:
-                        # Most direct offline read
-                        df = fg.read(
-                            online=False,
-                            dataframe_type="default",
-                            read_options={"use_hive": False}
-                        )
-                        
-                        if df is not None and not df.empty:
-                            st.success(f"✅ Method 5a: Retrieved {len(df)} records from offline storage!")
-                        else:
-                            raise ValueError("Empty result")
-                            
-                    except Exception as e5a:
-                        st.info(f"Method 5a failed: {str(e5a)[:100]}")
-                        
-                        # Try getting via feature view batch data
-                        try:
-                            st.info("Trying feature view batch data...")
-                            
-                            # Create or get feature view for batch reading
-                            try:
-                                fv = fs.get_feature_view("karachi_aqi_view", version=1)
-                            except:
-                                # Create temporary view
-                                query = fg.select_all()
-                                fv = fs.create_feature_view(
-                                    name="temp_batch_view",
-                                    version=1,
-                                    query=query
-                                )
-                            
-                            # Get batch data (offline)
-                            df = fv.get_batch_data()
-                            
-                            if df is not None and not df.empty:
-                                st.success(f"✅ Method 5b: Retrieved {len(df)} records via feature view!")
-                            else:
-                                raise ValueError("Empty batch data")
-                                
-                        except Exception as e5b:
-                            st.warning(f"Method 5b failed: {str(e5b)[:100]}")
-                            raise ValueError("All offline access methods failed")
-                        
-                except Exception as e5:
-                    st.warning(f"⚠️ Method 5 failed: {str(e5)[:200]}")
-            
-            # === Final check ===
-            if df is None or df.empty:
-                st.error("❌ All REST API methods failed!")
-                st.error("💡 The Hopsworks backend may not have REST endpoints available for data access.")
-                st.info("🔧 **Alternative Solution**: Download data manually from Hopsworks UI and upload to Streamlit")
+            except Exception as fv_error:
+                st.info(f"⚠️ Feature View failed: {str(fv_error)[:100]}")
+                st.info("🔄 Switching to Feature Group direct read...")
                 
-                with st.expander("📋 Manual Download Instructions"):
-                    st.markdown("""
-                    ### Manual Workaround:
-                    
-                    1. **Go to Hopsworks UI** → Feature Store → `karachi_aqi_forecast`
-                    2. **Click "Preview"** or "Download"
-                    3. **Export as CSV/Parquet**
-                    4. **Upload to your GitHub repo** as `data/forecast_data.csv`
-                    5. **Update the code** to read from local file instead
-                    
-                    This bypasses all API/version issues completely.
-                    """)
+                # Method 2: Direct Feature Group read (user's working fallback)
+                fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+                st.info(f"✅ Feature Group found: {fg.name} v{fg.version}")
                 
-                return None, best_model_obj, leaderboard
+                # Simple read without any complex options
+                st.info("📥 Reading data with simple fg.read()...")
+                df = fg.read()
                 
-        except Exception as api_error:
-            st.error(f"❌ REST API connection failed: {str(api_error)}")
+                if df is not None and not df.empty:
+                    st.success(f"✅ SUCCESS! Loaded {len(df)} records using simple fg.read()!")
+                else:
+                    raise ValueError("Empty result from fg.read()")
+        
+        except Exception as e:
+            st.error(f"❌ User's method also failed: {str(e)[:200]}")
+            st.error("This means the Query Service is completely blocking access")
             return None, best_model_obj, leaderboard
 
-        # Process the dataframe
+        # Process the dataframe if we got it
         if df is not None and not df.empty:
             try:
                 # Ensure timestamp column exists

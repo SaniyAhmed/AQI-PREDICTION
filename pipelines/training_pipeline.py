@@ -7,23 +7,23 @@ import hopsworks
 import joblib
 import shutil
 import time
+import numpy as np
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.svm import SVR 
 from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import root_mean_squared_error, mean_absolute_error, r2_score
-from sklearn.experimental import enable_halving_search_cv 
-from sklearn.model_selection import HalvingRandomSearchCV, train_test_split
+from sklearn.metrics import root_mean_squared_error, mean_absolute_error
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
-def get_forecast_features(trained_columns):
+def get_forecast_features(trained_columns, latest_actuals):
+    """Fetches weather forecast and seeds missing lag features with real latest data."""
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,dew_point_2m,pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
         "forecast_days": 3
     }).json()
+    
     df_f = pd.DataFrame(res["hourly"])
     df_f['time'] = pd.to_datetime(df_f['time'])
     
@@ -31,45 +31,50 @@ def get_forecast_features(trained_columns):
         'year': df_f['time'].dt.year.astype('int64'), 
         'month': df_f['time'].dt.month.astype('int64'),
         'day': df_f['time'].dt.day.astype('int64'), 
-        'hour': df_f['time'].dt.hour.astype('int64')
+        'hour': df_f['time'].dt.hour.astype('int64'),
+        'weekday': df_f['time'].dt.weekday.astype('int64')
     })
     
     name_map = {
-        'pm2_5':'pm25','pm10':'pm10','carbon_monoxide':'co',
-        'nitrogen_dioxide':'no2','sulphur_dioxide':'so2','ozone':'o3',
+        'pm2_5':'pm25', 'pm10':'pm10', 'carbon_monoxide':'co',
+        'nitrogen_dioxide':'no2', 'sulphur_dioxide':'so2', 'ozone':'o3',
         'temperature_2m':'temperature', 'relative_humidity_2m':'humidity',
-        'wind_speed_10m':'wind_speed','dew_point_2m':'dew_point'
+        'wind_speed_10m':'wind_speed', 'dew_point_2m':'dew_point'
     }
     
     for api, loc in name_map.items(): 
         if api in df_f.columns: prep[loc] = df_f[api].astype('float64')
     
     for c in trained_columns:
-        if c not in prep.columns: prep[c] = 0.0
+        if c not in prep.columns:
+            prep[c] = latest_actuals.get(c, 0.0)
+            if c == "dew_pointt" and "dew_point" in prep.columns:
+                prep["dew_pointt"] = prep["dew_point"]
         
     return prep[trained_columns].ffill().bfill(), df_f['time']
 
 def run_pipeline():
-    # Connection with slightly longer timeout for stability
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    print("📥 Fetching Data...")
+    print("\n📥 Fetching Latest Data...")
+    fg_list = fs.get_feature_groups(name="karachi_aqi")
+    latest_fg = sorted(fg_list, key=lambda x: x.version)[-1]
+    full_df = latest_fg.read()
     
-    try:
-        fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-        X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
-        print("✅ Data loaded from Feature View V5")
-    except Exception:
-        fg_list = fs.get_feature_groups(name="karachi_aqi")
-        latest_fg = sorted(fg_list, key=lambda x: x.version)[-1]
-        print(f"🚀 Using Latest Feature Group: Version {latest_fg.version}")
-        full_df = latest_fg.read()
-        X = full_df.drop(columns=["aqi"])
-        y = full_df[["aqi"]]
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # --- PRINT CURRENT AQI ---
+    latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
+    latest_actuals = latest_row.to_dict()
+    current_aqi = latest_actuals.get('aqi')
+    print("-" * 30)
+    print(f"📍 CURRENT AQI (Latest Record): {current_aqi:.2f}")
+    print(f"⏰ Recorded At: {int(latest_row['day'])}/{int(latest_row['month'])} - {int(latest_row['hour'])}:00")
+    print("-" * 30)
 
+    X = full_df.drop(columns=["aqi"])
+    y = full_df[["aqi"]]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 
@@ -78,76 +83,45 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    param_grids = {
-        "RandomForest": {"n_estimators": [500], "max_depth": [20]},
-        "XGBoost": {"n_estimators": [200], "learning_rate": [0.05], "max_depth": [5]},
-        "SVR": {"C": [10.0], "epsilon": [0.1]}
-    }
-    
     base_models = {
-        "RandomForest": RandomForestRegressor(random_state=42, n_jobs=-1),
-        "XGBoost": XGBRegressor(random_state=42, n_jobs=-1),
-        "SVR": SVR()
+        "RandomForest": RandomForestRegressor(n_estimators=500, max_depth=20, random_state=42, n_jobs=-1),
+        "XGBoost": XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, random_state=42)
     }
 
     best_m, best_score, best_name = None, float('inf'), ""
 
-    print("\n🏆 TOURNAMENT STARTING")
     for name, model in base_models.items():
-        print(f"🔍 Training {name}...")
-        search = HalvingRandomSearchCV(model, param_grids[name], factor=3, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
-        search.fit(X_train_s, y_train.values.ravel())
-        final_model = search.best_estimator_
-        
-        train_rmse = root_mean_squared_error(y_train, final_model.predict(X_train_s))
-        test_rmse = root_mean_squared_error(y_test, final_model.predict(X_test_s))
-        print(f"   {name} -> Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
+        model.fit(X_train_s, y_train.values.ravel())
+        t_rmse = root_mean_squared_error(y_test, model.predict(X_test_s))
+        if t_rmse < best_score:
+            best_score, best_m, best_name = t_rmse, model, name
 
-        m_dir = f"model_dir_{name.lower()}"
-        if os.path.exists(m_dir): shutil.rmtree(m_dir)
-        os.makedirs(m_dir)
-        joblib.dump(final_model, f"{m_dir}/karachi_aqi_model.pkl")
-        joblib.dump(scaler, f"{m_dir}/scaler.pkl")
-        
-        mr.python.create_model(
-            name="karachi_aqi_model", 
-            metrics={"train_rmse": float(train_rmse), "test_rmse": float(test_rmse)},
-            description=f"Type: {name}"
-        ).save(m_dir)
+    print(f"\n🏆 CHAMPION MODEL: {best_name} (Test RMSE: {best_score:.4f})")
 
-        if test_rmse < best_score:
-            best_score, best_m, best_name = test_rmse, final_model, name
-
-    # --- FORECAST GENERATION ---
-    X_f, times = get_forecast_features(feature_names)
+    # --- FORECAST GENERATION & PRINTING ---
+    X_f, times = get_forecast_features(feature_names, latest_actuals)
     preds = best_m.predict(scaler.transform(X_f))
+    
     forecast_df = X_f[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = preds.round(2)
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    for col in ['year', 'month', 'day', 'hour']:
-        forecast_df[col] = forecast_df[col].astype('int64')
+    print("\n🔮 3-DAY AQI FORECAST (Next 72 Hours):")
+    print("=" * 45)
+    # Print a summary (e.g., every 6 hours to keep it clean)
+    summary_print = forecast_df.iloc[::6] 
+    for _, row in summary_print.iterrows():
+        print(f"📅 {row['prediction_timestamp']} | Predicted AQI: {row['predicted_aqi']:>6}")
+    print("=" * 45)
 
-    fg = fs.get_or_create_feature_group(
+    # Save to Hopsworks
+    fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
-    
-    # --- RESILIENT UPLOAD LOGIC ---
-    print("\n🚀 Uploading forecast...")
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            fg.insert(forecast_df, write_options={"wait_for_job": False})
-            print("✅ Forecast uploaded successfully.")
-            break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"⚠️ Connection dropped. Retrying in 5s... (Attempt {attempt+1}/{max_retries})")
-                time.sleep(5)
-            else:
-                print("❌ Failed to upload forecast after 3 attempts.")
-                raise e
+    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
+    print("✅ Forecast uploaded to Hopsworks Feature Store.")
 
 if __name__ == "__main__":
+    from sklearn.model_selection import train_test_split
     run_pipeline()

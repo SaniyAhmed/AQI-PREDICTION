@@ -16,8 +16,6 @@ pandas==2.2.2
 pyarrow
 
 # --- Web Framework ---
-flask
-flask-cors
 streamlit
 
 # --- Visualization ---

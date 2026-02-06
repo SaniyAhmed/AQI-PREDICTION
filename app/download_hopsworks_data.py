@@ -1,60 +1,123 @@
-"""
-Surgical Data Fetch for Karachi AQI Forecast v5
-Optimized for hsfs 4.2.x
-"""
 import os
 import pandas as pd
 import sys
 
-# Force disable experimental features
+# Force legacy read paths to avoid Arrow Flight Binder Errors
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import hopsworks
 
 print("🔐 Logging into Hopsworks...")
 try:
+    # Use your secret key
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
 except Exception as e:
     print(f"❌ Login failed: {e}")
     sys.exit(1)
 
-print("📥 Attempting to grab 'karachi_aqi_forecast' version 5...")
+# TARGET: The specific forecast group you mentioned
+FG_NAME = "karachi_aqi_forecast"
+FG_VERSION = 5
+
+print(f"📥 Fetching ONLY {FG_NAME} v{FG_VERSION}...")
 
 try:
-    # We use get_or_create but with existing settings to force a retrieval
-    fg = fs.get_or_create_feature_group(
-        name="karachi_aqi_forecast",
-        version=5,
-        primary_key=['year', 'month', 'day', 'hour'], # Matching your known schema
-        online_enabled=False
-    )
+    # Use the plural method but WITH the name argument to avoid the "missing argument" error
+    fgs = fs.get_feature_groups(name=FG_NAME)
     
-    print(f"✅ Object found: {fg.name} v{fg.version}")
+    # Filter for version 5 manually from the returned list
+    target_fg = next((fg for fg in fgs if fg.version == FG_VERSION), None)
     
-    # Use the most basic read possible
-    print("Reading data...")
-    df = fg.read()
+    if target_fg is None:
+        print(f"❌ Version {FG_VERSION} not found in the list for {FG_NAME}.")
+        print("Available versions found:")
+        for fg in fgs:
+            print(f" - Version: {fg.version}")
+        
+        # Emergency Fallback: If 5 isn't there, take the highest version available
+        if fgs:
+            target_fg = sorted(fgs, key=lambda x: x.version, reverse=True)[0]
+            print(f"⚠️ Falling back to highest available: Version {target_fg.version}")
+        else:
+            raise ValueError(f"No Feature Groups found with name '{FG_NAME}'")
+
+    print(f"🚀 Reading data from {target_fg.name} v{target_fg.version}...")
+    
+    # The most stable read method for HSFS 4.x
+    df = target_fg.read()
     
     if df is None or df.empty:
-        # Fallback: maybe it's version 1?
-        print("⚠️ v5 empty, trying v1...")
-        fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
-        df = fg.read()
+        raise ValueError("The data returned is empty.")
 
-    if df is not None and not df.empty:
-        print(f"✅ Success! Loaded {len(df)} rows.")
-        # Create directory and save
-        os.makedirs('data', exist_ok=True)
-        df.to_csv('data/forecast_data.csv', index=False)
-        print("💾 File saved to data/forecast_data.csv")
-    else:
-        print("❌ Dataframe is still empty after all attempts.")
-        sys.exit(1)
+    # Success path
+    print(f"✅ Successfully loaded {len(df)} records.")
+    os.makedirs('data', exist_ok=True)
+    output_path = 'data/forecast_data.csv'
+    df.to_csv(output_path, index=False)
+    print(f"💾 Saved to {output_path}")
 
 except Exception as e:
-    print(f"❌ Read failed with error: {str(e)}")
-    print("\n💡 DEBUG TIP: Check your Hopsworks UI.")
-    print("Go to Feature Groups -> Look for 'karachi_aqi_forecast'.")
-    print("If it's not there, copy the EXACT name you see and tell me!")
+    print(f"❌ Final attempt failed: {e}")
+    sys.exit(1)import os
+import pandas as pd
+import sys
+
+# Force legacy read paths to avoid Arrow Flight Binder Errors
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
+
+import hopsworks
+
+print("🔐 Logging into Hopsworks...")
+try:
+    # Use your secret key
+    project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
+    fs = project.get_feature_store()
+except Exception as e:
+    print(f"❌ Login failed: {e}")
+    sys.exit(1)
+
+# TARGET: The specific forecast group you mentioned
+FG_NAME = "karachi_aqi_forecast"
+FG_VERSION = 5
+
+print(f"📥 Fetching ONLY {FG_NAME} v{FG_VERSION}...")
+
+try:
+    # Use the plural method but WITH the name argument to avoid the "missing argument" error
+    fgs = fs.get_feature_groups(name=FG_NAME)
+    
+    # Filter for version 5 manually from the returned list
+    target_fg = next((fg for fg in fgs if fg.version == FG_VERSION), None)
+    
+    if target_fg is None:
+        print(f"❌ Version {FG_VERSION} not found in the list for {FG_NAME}.")
+        print("Available versions found:")
+        for fg in fgs:
+            print(f" - Version: {fg.version}")
+        
+        # Emergency Fallback: If 5 isn't there, take the highest version available
+        if fgs:
+            target_fg = sorted(fgs, key=lambda x: x.version, reverse=True)[0]
+            print(f"⚠️ Falling back to highest available: Version {target_fg.version}")
+        else:
+            raise ValueError(f"No Feature Groups found with name '{FG_NAME}'")
+
+    print(f"🚀 Reading data from {target_fg.name} v{target_fg.version}...")
+    
+    # The most stable read method for HSFS 4.x
+    df = target_fg.read()
+    
+    if df is None or df.empty:
+        raise ValueError("The data returned is empty.")
+
+    # Success path
+    print(f"✅ Successfully loaded {len(df)} records.")
+    os.makedirs('data', exist_ok=True)
+    output_path = 'data/forecast_data.csv'
+    df.to_csv(output_path, index=False)
+    print(f"💾 Saved to {output_path}")
+
+except Exception as e:
+    print(f"❌ Final attempt failed: {e}")
     sys.exit(1)

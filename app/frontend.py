@@ -87,10 +87,11 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- HOPSWORKS 4.2.2 FEATURE VIEW V5 FETCH ---
+# --- HOPSWORKS 4.2.2 DATASET API BYPASS ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
+        # Disable Flight Client
         os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
         
         api_key = st.secrets["MY_HOPSWORK_KEY"]
@@ -98,7 +99,7 @@ def fetch_hopsworks_data():
         fs = project.get_feature_store()
         mr = project.get_model_registry()
 
-        # 1. Models & Leaderboard
+        # 1. Models & Leaderboard (Usually doesn't use Query Service, so this is safe)
         model_types = ["karachi_aqi_randomforest", "karachi_aqi_xgboost", "karachi_aqi_svr"]
         leaderboard = []
         best_model_obj = None
@@ -125,21 +126,20 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. FEATURE VIEW V5 DATA READ
+        # 2. DATA READ: THE DATASET API (BYPASSES QUERY SERVICE ENTIRELY)
         try:
-            # Explicitly targeting Version 5
-            fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-            
-            # get_batch_data() is the most stable 4.x REST-based read method
-            df = fv.get_batch_data()
-        except Exception as fv_err:
-            st.error(f"❌ Feature View V5 Error: {fv_err}")
-            # Fallback to Feature Group if View fails
+            # We skip fs.get_feature_view and go to the Feature Group's basic read
+            # but we force 'arrow=False' which forces a standard REST download
             fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
+            
+            # This 'read' call is the most basic REST call possible in the 4.x client
+            df = fg.read(online=False, read_options={"use_hive": False, "arrow": False})
+        except Exception as e:
+            st.error(f"❌ REST Read Failed: {e}")
+            # Last ditch attempt: Use Python Selection to pull data
             df = fg.select_all().read(read_options={"use_hive": False})
 
         if df is not None:
-            # Standardize column names if Hopsworks changed them
             df.columns = [c.lower() for c in df.columns]
             df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
             df = df.sort_values('prediction_timestamp')
@@ -223,7 +223,7 @@ if df is not None and not df.empty and best_model_obj is not None:
             st.markdown(table_html, unsafe_allow_html=True)
             st.markdown(f'<div class="registry-path">Registry Path: v{version}</div>', unsafe_allow_html=True)
 else:
-    st.warning("🔭 Sentinel is searching for data in Hopsworks (View V5)...")
+    st.warning("🔭 Sentinel is connecting to Hopsworks Datasets...")
 
 # Sidebar
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1684/1684375.png", width=150)

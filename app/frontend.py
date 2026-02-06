@@ -307,7 +307,7 @@ def fetch_hopsworks_data():
                     preview_response = requests.get(
                         preview_url, 
                         headers=headers,
-                        params={"limit": 1000}
+                        params={"limit": 100}  # Hopsworks max limit is 100
                     )
                     
                     if preview_response.status_code == 200:
@@ -357,7 +357,7 @@ def fetch_hopsworks_data():
                         read_response = requests.get(
                             read_url,
                             headers=headers,
-                            params={"limit": 1000}
+                            params={"limit": 100}  # Hopsworks max limit is 100
                         )
                         
                         if read_response.status_code == 200:

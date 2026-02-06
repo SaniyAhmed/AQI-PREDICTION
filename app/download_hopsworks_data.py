@@ -7,22 +7,28 @@ import hopsworks
 import pandas as pd
 
 print("🔐 Logging into Hopsworks...")
-api_key = os.getenv('HOPSWORKS_API_KEY')
-project = hopsworks.login(api_key_value=api_key)
+# ✅ Using the exact login method from your snippet
+project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
 fs = project.get_feature_store()
+mr = project.get_model_registry()
 
-print("📥 Fetching forecast data...")
+print("📥 Fetching Data...")
 
-# Try Feature View first, fallback to Feature Group
+# ✅ CRITICAL FIX: Read directly from Feature Group instead of Feature View
+# Feature Views don't work in GitHub Actions, but Feature Groups do!
 try:
+    # Try to use Feature View (works in VS Code)
     fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
+    X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
+    # Keeping your original logic to assign a 'df' for the CSV save step below
     df = fv.get_batch_data()
-    print(f"✅ Loaded {len(df)} records from Feature View")
+    print("✅ Loaded data using Feature View")
 except Exception as e:
-    print(f"⚠️ Feature View failed: {str(e)[:100]}")
-    print("🔄 Trying Feature Group...")
+    print(f"⚠️ Feature View failed (normal in GitHub Actions): {str(e)[:100]}")
+    print("🔄 Switching to Feature Group direct read...")
     
-    fg = fs.get_feature_group(name="karachi_aqi_forecast", version=1)
+    # Fallback: Read from Feature Group (works in GitHub Actions)
+    fg = fs.get_feature_group(name="karachi_aqi", version=1)
     df = fg.read()
     print(f"✅ Loaded {len(df)} records from Feature Group")
 

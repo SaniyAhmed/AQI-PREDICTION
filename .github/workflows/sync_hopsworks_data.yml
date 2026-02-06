@@ -20,7 +20,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install hopsworks pandas
+          pip install hopsworks pandas pyarrow
       
       - name: Download data from Hopsworks
         env:

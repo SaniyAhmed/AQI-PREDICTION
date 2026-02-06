@@ -4,14 +4,14 @@ This script runs in GitHub Actions to sync data hourly
 """
 import os
 
-# ✅ IMPLEMENTING WORKING LOGIC: Disable the buggy Flight Client before other imports
+# ✅ THE FIX: Disable the buggy Flight Client before hopsworks is initialized
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import hopsworks
 import pandas as pd
 
 print("🔐 Logging into Hopsworks...")
-# ✅ Using the exact login method from your snippet
+# ✅ Using the exact login method from your running script
 project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
 fs = project.get_feature_store()
 mr = project.get_model_registry()
@@ -23,8 +23,7 @@ print("📥 Fetching Data...")
 try:
     # Try to use Feature View (works in VS Code)
     fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-    X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
-    # Keeping your original logic to assign a 'df' for the CSV save step below
+    # Keeping your existing logic structure
     df = fv.get_batch_data()
     print("✅ Loaded data using Feature View")
 except Exception as e:

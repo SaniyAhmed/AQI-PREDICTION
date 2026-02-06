@@ -3,7 +3,7 @@ name: Sync Hopsworks Data
 on:
   schedule:
     - cron: '0 * * * *'  # Every hour
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch: 
 
 jobs:
   sync-data:
@@ -20,7 +20,8 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install hopsworks pandas pyarrow
+          # Downgrading to match your backend version 4.2.2
+          pip install "hopsworks==4.2.*" pandas pyarrow
       
       - name: Download data from Hopsworks
         env:
@@ -32,5 +33,4 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
           git add data/forecast_data.csv
-          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update forecast data [skip ci]"
-          git push
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update forecast data [skip ci]" && git push)

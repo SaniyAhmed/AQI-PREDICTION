@@ -1,36 +1,46 @@
-name: Sync Hopsworks Data
+"""
+Download forecast data from Hopsworks Feature Store
+This script runs in GitHub Actions to sync data hourly
+"""
+import os
 
-on:
-  schedule:
-    - cron: '0 * * * *'  # Every hour
-  workflow_dispatch:  # Allow manual trigger
+# ✅ FORCE DISABLE FLIGHT CLIENT
+os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
-jobs:
-  sync-data:
-    runs-on: ubuntu-latest
+import hopsworks
+import pandas as pd
+
+print("🔐 Logging into Hopsworks...")
+project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
+fs = project.get_feature_store()
+
+print("📥 Fetching Data...")
+
+# ✅ IMPLEMENTING THE FIX:
+# We use engine="hive" explicitly in the read calls to ensure 
+# it doesn't use the buggy Arrow Flight Query Service.
+try:
+    print("Trying Feature View with Hive engine...")
+    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
+    # Using read() with engine="hive" is the most stable way in GitHub Actions
+    df = fv.get_batch_data(read_options={"use_hive": True})
+    print("✅ Loaded data using Feature View (Hive)")
+except Exception as e:
+    print(f"⚠️ Feature View failed: {str(e)[:100]}")
+    print("🔄 Switching to Feature Group direct read (Hive)...")
     
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      - name: Install dependencies
-        run: |
-          pip install hopsworks pandas pyarrow
-      
-      - name: Download data from Hopsworks
-        env:
-          MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
-        run: python app/download_hopsworks_data.py
-      
-      - name: Commit and push changes
-        run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-          git add data/forecast_data.csv
-          git diff --quiet && git diff --staged --quiet || git commit -m "Auto-update forecast data [skip ci]"
-          git push
+    fg = fs.get_feature_group(name="karachi_aqi", version=1)
+    # Explicitly telling the engine NOT to use the online/flight service
+    df = fg.read(read_options={"use_hive": True})
+    print(f"✅ Loaded {len(df)} records from Feature Group (Hive)")
+
+# Ensure data directory exists
+os.makedirs('data', exist_ok=True)
+
+# Save to CSV
+output_path = 'data/forecast_data.csv'
+df.to_csv(output_path, index=False)
+
+print(f"💾 Saved data to {output_path}")
+print(f"📊 Total records: {len(df)}")
+print("✅ Sync complete!")

@@ -1,6 +1,6 @@
 """
-Download AI Forecast data from Hopsworks (Version 5)
-Using explicit selection to avoid NoneType errors
+Dynamic Data Discovery Script
+Lists all feature groups and pulls the most relevant forecast data.
 """
 import os
 import pandas as pd
@@ -19,42 +19,49 @@ except Exception as e:
     print(f"❌ Login failed: {e}")
     sys.exit(1)
 
-print("📥 Fetching AI Forecast Data (Version 5)...")
+print("🔍 Inspecting Feature Store...")
 
 try:
-    # 1. Get the Feature Group object first
-    fg = fs.get_feature_group(name="karachi_aqi_forecast", version=5)
+    # Get all available feature groups
+    fgs = fs.get_feature_groups()
+    print(f"Found {len(fgs)} feature groups:")
     
-    if fg is None:
-        raise ValueError("Feature Group 'karachi_aqi_forecast' v5 not found!")
+    target_fg = None
+    
+    # List them out so you can see them in your GitHub Action logs
+    for fg in fgs:
+        print(f" - {fg.name} (Version: {fg.version})")
+        # Logic to pick the right one: 
+        # We want 'karachi_aqi_forecast' or 'karachi_aqi_prediction'
+        if "karachi_aqi" in fg.name.lower():
+            # If we find version 5, that's likely our winner
+            if fg.version == 5:
+                target_fg = fg
+            # Fallback to whatever version of 'forecast' or 'prediction' is there
+            elif "forecast" in fg.name.lower() or "prediction" in fg.name.lower():
+                if not target_fg or fg.version > target_fg.version:
+                    target_fg = fg
 
-    # 2. Use select_all() - This is the most stable way to trigger a read in 4.2.x
-    print("Executing select_all().read()...")
-    df = fg.select_all().read()
+    if target_fg is None:
+        print("❌ Could not find a matching forecast group. Defaulting to first available...")
+        target_fg = fgs[0]
+
+    print(f"🚀 Selected for Download: {target_fg.name} (v{target_fg.version})")
+    
+    # Read data
+    df = target_fg.select_all().read()
     
     if df is None or df.empty:
-        raise ValueError("Dataframe is empty. Ensure the Feature Group contains data.")
+        raise ValueError("Dataframe is empty.")
         
-    print(f"✅ Successfully loaded {len(df)} forecast records")
+    print(f"✅ Successfully loaded {len(df)} records")
+
+    # Create directory and save
+    os.makedirs('data', exist_ok=True)
+    output_path = 'data/forecast_data.csv'
+    df.to_csv(output_path, index=False)
+    print(f"💾 Saved to {output_path}")
 
 except Exception as e:
-    print(f"❌ Read failed: {e}")
-    print("🔄 Attempting ultimate fallback (Feature View)...")
-    try:
-        # If the FG read fails, sometimes the Feature View is more accessible
-        fv = fs.get_feature_view(name="karachi_aqi_view", version=1)
-        df = fv.get_batch_data()
-        print("✅ Loaded data via Feature View")
-    except Exception as e2:
-        print(f"❌ All retrieval methods failed. Error: {e2}")
-        sys.exit(1)
-
-# Ensure the data directory exists
-os.makedirs('data', exist_ok=True)
-
-# Save to CSV
-output_path = 'data/forecast_data.csv'
-df.to_csv(output_path, index=False)
-
-print(f"💾 Saved {len(df)} rows to {output_path}")
-print("🚀 Sync complete for Version 5!")
+    print(f"❌ Critical Error: {e}")
+    sys.exit(1)

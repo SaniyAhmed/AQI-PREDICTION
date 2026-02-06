@@ -9,7 +9,7 @@ import os
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
-# --- CUSTOM CSS ---
+# --- CUSTOM CSS (STRICTLY PRESERVED) ---
 st.markdown("""
     <style>
     .block-container {
@@ -87,7 +87,7 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- UPDATED STABLE DATA FETCHING ---
+# --- UPDATED DATA FETCHING (TARGETING OFFLINE STORE) ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
@@ -109,7 +109,6 @@ def fetch_hopsworks_data():
                 if versions:
                     versions.sort(key=lambda x: x.version, reverse=True)
                     latest = versions[0]
-                    # Try to find metrics in different places
                     metrics = getattr(latest, "training_metrics", getattr(latest, "metrics", {}))
                     curr_rmse = float(metrics.get('test_rmse', 999.0))
                     
@@ -129,16 +128,20 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. Get Forecast Data (Using the most stable "read" method)
+        # 2. Get Forecast Data (Bypassing Query Service)
         fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
         
-        # We try to read using the REST API which is safer for Cloud
+        # We explicitly use online=False to pull from the store we confirmed is populated
+        # use_hive=False ensures we use the simpler REST connection
         try:
-            df = fg.read(read_options={"use_hive": False})
+            df = fg.read(online=False, read_options={"use_hive": False})
         except:
-            # Fallback for severe connection issues
-            st.warning("🔄 High-speed query failed. Switching to direct fetch...")
-            df = fg.select_all().read(read_options={"use_hive": False})
+            st.warning("🔄 Standard read failed. Attempting fallback Select All...")
+            df = fg.select_all().read(online=False, read_options={"use_hive": False})
+
+        if df is None or df.empty:
+            st.error("⚠️ Data was found in Hopsworks preview but the app is receiving an empty table.")
+            return None, None, []
 
         df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
         df = df.sort_values('prediction_timestamp')

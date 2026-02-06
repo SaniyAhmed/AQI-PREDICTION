@@ -58,19 +58,27 @@ def run_pipeline():
     print("📥 Fetching Data...")
     
     try:
+        # Attempt Feature View (Version 5 as specified in previous context)
         fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
         X_train, X_test, y_train, y_test = fv.train_test_split(test_size=0.2)
-        print("✅ Loaded data using Feature View")
+        print("✅ Loaded data using Feature View Version 5")
     except Exception as e:
-        print(f"⚠️ Feature View failed: {str(e)[:100]}")
-        fg = fs.get_feature_group(name="karachi_aqi", version=1)
-        full_df = fg.read()
+        print(f"⚠️ Feature View failed: {str(e)[:50]}...")
+        print("🔄 Detecting latest Feature Group version...")
+        
+        # AUTO-DETECT LATEST VERSION logic
+        fg_list = fs.get_feature_groups(name="karachi_aqi")
+        # Sort by version number and take the highest
+        latest_fg = sorted(fg_list, key=lambda x: x.version)[-1]
+        print(f"✅ Found and loading Latest Feature Group: Version {latest_fg.version}")
+        
+        full_df = latest_fg.read()
         target = "aqi"
         X = full_df.drop(columns=[target])
         y = full_df[[target]]
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        print(f"✅ Loaded {len(full_df)} rows from Feature Group")
     
+    # Cleanup data
     X_train, y_train = X_train.dropna(), y_train.loc[X_train.dropna().index]
     X_test, y_test = X_test.dropna(), y_test.loc[X_test.dropna().index]
 
@@ -104,8 +112,8 @@ def run_pipeline():
         "SVR": SVR(cache_size=1000)
     }
 
-    print("\n🏆 TOURNAMENT")
-    print("=" * 60)
+    print("\n🏆 TOURNAMENT STARTING")
+    print("=" * 65)
     best_m, best_score, best_name = None, float('inf'), ""
 
     for name, model in base_models.items():
@@ -125,31 +133,44 @@ def run_pipeline():
         search.fit(X_train_s, y_train.values.ravel())
         
         final_model = search.best_estimator_
-        test_preds = final_model.predict(X_test_s)
-        test_rmse = root_mean_squared_error(y_test, test_preds)
         
-        # --- SAVE AND REGISTER EVERY MODEL INTO ONE REGISTRY ---
+        # OVERFITTING ANALYSIS
+        train_preds = final_model.predict(X_train_s)
+        test_preds = final_model.predict(X_test_s)
+        
+        train_rmse = root_mean_squared_error(y_train, train_preds)
+        test_rmse = root_mean_squared_error(y_test, test_preds)
+        overfit_gap = test_rmse - train_rmse
+
+        print(f"📊 {name} Performance:")
+        print(f"   Train RMSE: {train_rmse:.4f}")
+        print(f"   Test RMSE:  {test_rmse:.4f}")
+        print(f"   Gap:        {overfit_gap:.4f} ({'Healthy' if overfit_gap < 0.5 else 'Potential Overfit'})")
+        
+        # --- SAVE AND REGISTER ---
         m_dir = f"model_dir_{name.lower()}"
         if os.path.exists(m_dir): shutil.rmtree(m_dir)
         os.makedirs(m_dir)
         joblib.dump(final_model, f"{m_dir}/karachi_aqi_model.pkl", compress=3)
         joblib.dump(scaler, f"{m_dir}/scaler.pkl")
         
-        # CHANGED: All versions now go to 'karachi_aqi_model'
         mr.python.create_model(
             name="karachi_aqi_model", 
             metrics={
+                "train_rmse": float(train_rmse),
                 "test_rmse": float(test_rmse),
                 "test_mae": float(mean_absolute_error(y_test, test_preds)),
-                "test_r2": float(r2_score(y_test, test_preds))
+                "overfit_gap": float(overfit_gap)
             },
-            description=f"Model: {name} | Best Params: {search.best_params_}"
+            description=f"Type: {name} | Params: {search.best_params_}"
         ).save(m_dir)
 
         if test_rmse < best_score:
             best_score, best_m, best_name = test_rmse, final_model, name
 
-    print(f"\n🥇 FORECAST CHAMPION: {best_name} (RMSE: {best_score:.4f})")
+    print("\n" + "=" * 65)
+    print(f"🥇 CHAMPION: {best_name} with Test RMSE: {best_score:.4f}")
+    print("=" * 65)
 
     # --- FORECAST GENERATION ---
     X_f, times = get_forecast_features(X_train.columns.tolist())

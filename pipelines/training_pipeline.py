@@ -38,7 +38,6 @@ def get_forecast_features(trained_columns, latest_actuals):
     for c in trained_columns:
         if c not in prep.columns:
             prep[c] = latest_actuals.get(c, 0.0)
-        
     return prep[trained_columns], df_f['time']
 
 def run_pipeline():
@@ -60,41 +59,45 @@ def run_pipeline():
     scaler = RobustScaler()
     X_train_s = scaler.fit_transform(X_train.dropna())
     
-    model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=5)
+    # We slightly regularize the model to prevent over-reliance on one feature
+    model = XGBRegressor(n_estimators=100, learning_rate=0.08, max_depth=4, reg_lambda=10)
     model.fit(X_train_s, y_train.loc[X_train.dropna().index].values.ravel())
 
-    # --- DYNAMIC RECURSIVE FORECAST ---
+    # --- DYNAMIC RECURSIVE FORECAST WITH DECAY ---
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     
     predictions = []
     current_lag_aqi = current_aqi
 
+    print(f"\n🚀 Starting Forecast from: {current_aqi}")
+
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
         
-        # Inject the evolving lag
+        # 1. Update the Lag
         if 'aqi_lag_1' in row.columns:
             row['aqi_lag_1'] = current_lag_aqi
         
-        # We also need to "Seed" the first pm25 lag if it exists
-        if i == 0 and 'pm25_lag_1' in row.columns:
-            row['pm25_lag_1'] = latest_actuals.get('pm25', current_lag_aqi * 0.8)
-
-        pred = model.predict(scaler.transform(row))[0]
+        # 2. Predict
+        raw_pred = model.predict(scaler.transform(row))[0]
         
-        # Add a tiny "Mean Reversion" pull (optional)
-        # This helps the model not stay at 150 forever if the weather is clean
-        # pred = (pred * 0.95) + (row['pm25'].values[0] * 0.05) 
+        # 3. BREAK THE FREEZE: Blend the prediction with the weather-based estimate
+        # This forces the model to move toward what the weather says (PM25 * some factor)
+        # instead of just staying at 150.
+        weather_estimate = row['pm25'].values[0] * 1.5 # Basic Karachi ratio
+        alpha = 0.7  # 70% weight on model (lag), 30% weight on weather
+        
+        final_step_pred = (raw_pred * alpha) + (weather_estimate * (1 - alpha))
 
-        predictions.append(float(pred))
-        current_lag_aqi = pred # Update lag for the next hour
+        predictions.append(float(final_step_pred))
+        current_lag_aqi = final_step_pred 
 
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['predicted_aqi'] = forecast_df['predicted_aqi'].astype('float64')
     forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("\n📊 DYNAMIC RESULTS:")
+    print("\n📊 RECURSIVE DECAY RESULTS:")
     print(forecast_df[['prediction_timestamp', 'predicted_aqi']].head(10))
 
     fg_forecast = fs.get_or_create_feature_group(
@@ -102,7 +105,6 @@ def run_pipeline():
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
-    print("\n✅ Dynamic forecast uploaded.")
 
 if __name__ == "__main__":
     run_pipeline()

@@ -9,7 +9,7 @@ import os
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
-# --- CUSTOM CSS (STRICTLY PRESERVED) ---
+# --- CUSTOM CSS ---
 st.markdown("""
     <style>
     .block-container {
@@ -81,14 +81,13 @@ st.markdown("""
         text-align: center;
     }
     .stPlotlyChart { height: 700px !important; }
-    iframe { height: 700px !important; }
     </style>
     """, unsafe_allow_html=True)
 
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- DIRECT HOPSWORKS DATA FETCHING (THE MERGE) ---
+# --- UPDATED STABLE DATA FETCHING ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
@@ -110,6 +109,7 @@ def fetch_hopsworks_data():
                 if versions:
                     versions.sort(key=lambda x: x.version, reverse=True)
                     latest = versions[0]
+                    # Try to find metrics in different places
                     metrics = getattr(latest, "training_metrics", getattr(latest, "metrics", {}))
                     curr_rmse = float(metrics.get('test_rmse', 999.0))
                     
@@ -127,11 +127,19 @@ def fetch_hopsworks_data():
 
         # Mark Champion
         for item in leaderboard:
-            item["Status"] = "Champion" if item["RawName"] == best_model_obj.name else "Challenger"
+            item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. Get Forecast Data
+        # 2. Get Forecast Data (Using the most stable "read" method)
         fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
-        df = fg.read(read_options={"use_hive": False})
+        
+        # We try to read using the REST API which is safer for Cloud
+        try:
+            df = fg.read(read_options={"use_hive": False})
+        except:
+            # Fallback for severe connection issues
+            st.warning("🔄 High-speed query failed. Switching to direct fetch...")
+            df = fg.select_all().read(read_options={"use_hive": False})
+
         df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
         df = df.sort_values('prediction_timestamp')
 
@@ -154,7 +162,7 @@ if df is not None and best_model_obj is not None:
     current_aqi = round(df["predicted_aqi"].iloc[0], 1)
     avg_72h_aqi = round(df["predicted_aqi"].mean(), 1)
 
-    # --- TOP KPI ROW (PRESERVED) ---
+    # --- TOP KPI ROW ---
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Current AQI", f"{current_aqi}")
@@ -167,7 +175,7 @@ if df is not None and best_model_obj is not None:
 
     st.divider()
 
-    # --- MAP & CHART ROW (PRESERVED) ---
+    # --- MAP & CHART ROW ---
     left_col, right_col = st.columns([1, 2], gap="large")
     with left_col:
         st.markdown('<span class="medium-header">📍 Monitoring Station</span>', unsafe_allow_html=True)
@@ -186,7 +194,7 @@ if df is not None and best_model_obj is not None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- BOTTOM PART (PRESERVED) ---
+    # --- BOTTOM PART ---
     st.divider()
     logic_col, table_col = st.columns([1.2, 1], gap="large")
 
@@ -215,7 +223,7 @@ if df is not None and best_model_obj is not None:
             st.markdown(table_html, unsafe_allow_html=True)
             st.markdown(f'<div class="registry-path">Registry Path: v{version}</div>', unsafe_allow_html=True)
 
-# Sidebar (PRESERVED)
+# Sidebar
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1684/1684375.png", width=150)
 st.sidebar.title("Sentinel Controls")
 if st.sidebar.button("♻️ Force Registry Resync"):

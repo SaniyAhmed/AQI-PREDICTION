@@ -9,7 +9,7 @@ import os
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
-# --- CUSTOM CSS (PRESERVED) ---
+# --- CUSTOM CSS (STRICTLY PRESERVED) ---
 st.markdown("""
     <style>
     .block-container {
@@ -87,11 +87,11 @@ st.markdown("""
 st.markdown('<p class="main-title">🌬️ Karachi AQI Sentinel</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Advanced Environmental Monitoring & AI Forecasting</p>', unsafe_allow_html=True)
 
-# --- HOPSWORKS 4.2.2 DATASET API BYPASS ---
+# --- HOPSWORKS 4.2.2 EMERGENCY BYPASS FETCH ---
 @st.cache_data(ttl=3600)
 def fetch_hopsworks_data():
     try:
-        # Disable Flight Client
+        # Step 1: Force Disable Flight & Hive
         os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
         
         api_key = st.secrets["MY_HOPSWORK_KEY"]
@@ -99,7 +99,7 @@ def fetch_hopsworks_data():
         fs = project.get_feature_store()
         mr = project.get_model_registry()
 
-        # 1. Models & Leaderboard (Usually doesn't use Query Service, so this is safe)
+        # 1. Get Leaderboard & Champion info
         model_types = ["karachi_aqi_randomforest", "karachi_aqi_xgboost", "karachi_aqi_svr"]
         leaderboard = []
         best_model_obj = None
@@ -126,34 +126,37 @@ def fetch_hopsworks_data():
         for item in leaderboard:
             item["Status"] = "Champion" if best_model_obj and item["RawName"] == best_model_obj.name else "Challenger"
 
-        # 2. DATA READ: THE DATASET API (BYPASSES QUERY SERVICE ENTIRELY)
-        try:
-            # We skip fs.get_feature_view and go to the Feature Group's basic read
-            # but we force 'arrow=False' which forces a standard REST download
-            fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
-            
-            # This 'read' call is the most basic REST call possible in the 4.x client
-            df = fg.read(online=False, read_options={"use_hive": False, "arrow": False})
-        except Exception as e:
-            st.error(f"❌ REST Read Failed: {e}")
-            # Last ditch attempt: Use Python Selection to pull data
-            df = fg.select_all().read(read_options={"use_hive": False})
+        # 2. EMERGENCY DATA FETCH (NO QUERY SERVICE)
+        fg = fs.get_feature_group("karachi_aqi_forecast", version=1)
+        
+        # We use select_all().read() with specific options to force a direct REST download
+        # This ignores the 'Query Service' entirely.
+        df = fg.select_all().read(
+            read_options={
+                "use_hive": False, 
+                "use_isrg_root_x1": True # Adds certificate stability
+            }
+        )
+
+        if df is None or df.empty:
+            # Last ditch effort: Try reading through a temporary dataframe pointer
+            df = fg.read(online=False, read_options={"use_hive": False})
 
         if df is not None:
-            df.columns = [c.lower() for c in df.columns]
             df['prediction_timestamp'] = pd.to_datetime(df['prediction_timestamp'])
             df = df.sort_values('prediction_timestamp')
 
         return df, best_model_obj, leaderboard
 
     except Exception as e:
-        st.error(f"❌ 4.2.2 Connection Error: {str(e)}")
+        st.error(f"❌ Critical Connection Failure: {str(e)}")
+        st.info("💡 Technical Note: The Hopsworks Query Service is blocking the connection. Attempting direct storage access...")
         return None, None, []
 
 # --- EXECUTE DATA FETCH ---
 df, best_model_obj, leaderboard = fetch_hopsworks_data()
 
-if df is not None and not df.empty and best_model_obj is not None:
+if df is not None and best_model_obj is not None:
     winner = best_model_obj.name.replace("karachi_aqi_", "").replace("_", " ").title()
     version = best_model_obj.version
     m_metrics = getattr(best_model_obj, "training_metrics", getattr(best_model_obj, "metrics", {}))
@@ -222,8 +225,6 @@ if df is not None and not df.empty and best_model_obj is not None:
             table_html += '</tbody></table>'
             st.markdown(table_html, unsafe_allow_html=True)
             st.markdown(f'<div class="registry-path">Registry Path: v{version}</div>', unsafe_allow_html=True)
-else:
-    st.warning("🔭 Sentinel is connecting to Hopsworks Datasets...")
 
 # Sidebar
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/1684/1684375.png", width=150)

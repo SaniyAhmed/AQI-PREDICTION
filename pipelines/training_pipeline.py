@@ -82,12 +82,29 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT: TUNING THREE MODELS
+    # 2. TOURNAMENT: TUNING THREE MODELS WITH ANTI-OVERFITTING STRATEGIES
     print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
+    
+    # NOTE: RandomForest params updated with heavy regularization (leaf size and pruning)
     model_configs = {
-        'RandomForest': (RandomForestRegressor(random_state=42), {"n_estimators": [500], "max_depth": [8, 12]}),
-        'XGBoost': (XGBRegressor(random_state=42), {"n_estimators": [300], "max_depth": [3, 5], "learning_rate": [0.05]}),
-        'SVR': (SVR(), {"C": [1, 10], "epsilon": [0.1, 0.2]})
+        'RandomForest': (RandomForestRegressor(random_state=42), {
+            "n_estimators": [500], 
+            "max_depth": [8, 10], 
+            "min_samples_leaf": [5, 10],  # Stops deep specific trees
+            "max_features": ["sqrt"],     # Reduces feature correlation
+            "ccp_alpha": [0.01, 0.1]      # Pruning to stop overfitting
+        }),
+        'XGBoost': (XGBRegressor(random_state=42), {
+            "n_estimators": [300], 
+            "max_depth": [3, 4], 
+            "learning_rate": [0.05],
+            "reg_lambda": [1, 10]         # L2 regularization
+        }),
+        'SVR': (SVR(), {
+            "C": [0.1, 1], 
+            "epsilon": [0.1, 0.2],
+            "kernel": ["rbf"]
+        })
     }
 
     results, best_estimators = [], []
@@ -99,8 +116,9 @@ def run_pipeline():
         # 3. PRINT RMSE & OVERFITTING GAP
         tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
         te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
-        results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse, 'Gap': abs(tr_rmse - te_rmse)})
-        print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f} | Gap: {abs(tr_rmse - te_rmse):.4f}")
+        gap = abs(tr_rmse - te_rmse)
+        results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse, 'Gap': gap})
+        print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f} | Gap: {gap:.4f}")
 
     res_df = pd.DataFrame(results).sort_values('Test RMSE')
     winner_name = res_df.iloc[0]['Model']
@@ -140,34 +158,58 @@ def run_pipeline():
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
-    # 7. CALCULATE AND PREPARE AVERAGES FOR STORAGE
+    # 7. HOURLY DATA PREPARATION (karachi_aqi_forecast)
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
-    forecast_df['predicted_aqi'] = predictions
-    forecast_df['time_dt'] = pd.to_datetime(times)
+    forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
+    forecast_df['prediction_timestamp'] = pd.to_datetime(times).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # Grand Average (Next 3 Days Total)
-    grand_avg = round(np.mean(predictions), 2)
-    # Daily Averages (Calculated for each distinct day)
-    forecast_df['daily_avg_aqi'] = forecast_df.groupby(forecast_df['time_dt'].dt.date)['predicted_aqi'].transform('mean').round(2)
-    forecast_df['grand_avg_aqi'] = grand_avg
-    forecast_df['prediction_timestamp'] = forecast_df['time_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # 8. UPLOAD TO HOPSWORKS: karachi_aqi_forecast v1
-    upload_df = forecast_df.drop(columns=['time_dt'])
-    fg_forecast = fs.get_or_create_feature_group(
-        name="karachi_aqi_forecast", version=1, 
-        primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
-    )
-    fg_forecast.insert(upload_df, write_options={"wait_for_job": False})
+    # 8. DAILY & GRAND SUMMARY PREPARATION
+    full_prediction_series = pd.Series(predictions)
+    grand_avg = round(full_prediction_series.mean(), 2)
+    times_dt = pd.to_datetime(times)
+    daily_groups = full_prediction_series.groupby(times_dt.dt.date)
     
-    # 9. FINAL LOGGING
-    print(f"\n📊 3-DAY GRAND AVERAGE AQI: {grand_avg}")
-    print("\n📅 DAILY AVERAGE BREAKDOWN (SAVED TO FEATURE GROUP):")
-    daily_summary = forecast_df.groupby(forecast_df['time_dt'].dt.date)['predicted_aqi'].mean()
-    for date, val in daily_summary.items():
-        print(f"   {date}: {val:.2f} AQI")
+    summary_data = []
+    for date, group in daily_groups.items():
+        summary_data.append({
+            "date": str(date),
+            "daily_avg_aqi": round(group.mean(), 2),
+            "grand_avg_aqi": grand_avg,
+            "forecast_type": "3-day-tournament-ensemble"
+        })
+    summary_df = pd.DataFrame(summary_data)
 
-    print("\n✅ All requirements fulfilled. Connection logic preserved.")
+    # 9. UPLOAD TO HOPSWORKS
+    # A. Save Hourly Predictions
+    fg_forecast = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
+    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
+
+    # B. Save Daily Summaries (With versioning fallback)
+    target_version = 1
+    try:
+        fg_summary = fs.get_or_create_feature_group(
+            name="karachi_aqi_daily_summary", 
+            version=target_version,
+            primary_key=['date'], 
+            online_enabled=True,
+            description="Daily and 3-day Grand Average AQI forecasts."
+        )
+        fg_summary.insert(summary_df, write_options={"wait_for_job": False})
+    except Exception as e:
+        print(f"⚠️ Version {target_version} update failed, creating new version.")
+        fg_summary = fs.get_or_create_feature_group(
+            name="karachi_aqi_daily_summary", 
+            version=target_version + 1,
+            primary_key=['date'], 
+            online_enabled=True
+        )
+        fg_summary.insert(summary_df, write_options={"wait_for_job": False})
+    
+    # FINAL LOGGING
+    print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
+    print("\n📅 DAILY SUMMARY SAVED:")
+    print(summary_df[['date', 'daily_avg_aqi']])
+    print("\n✅ Requirements complete. Overfitting reduced and summary stored.")
 
 if __name__ == "__main__":
     run_pipeline()

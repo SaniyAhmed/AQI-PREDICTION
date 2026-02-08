@@ -19,8 +19,6 @@ KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 OWM_API_KEY = os.getenv('OWM_API_KEY') 
 
 def get_forecast_features(trained_columns, latest_actuals):
-    """Fetches weather from Open-Meteo and pollutants from OpenWeatherMap."""
-    
     # 1. Fetch Weather Forecast (Open-Meteo)
     weather_res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
@@ -32,11 +30,9 @@ def get_forecast_features(trained_columns, latest_actuals):
     pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution/forecast?lat={KARACHI_LAT}&lon={KARACHI_LON}&appid={OWM_API_KEY}"
     pollution_res = requests.get(pollution_url).json()
     
-    # Parse Weather
     df_w = pd.DataFrame(weather_res["hourly"])
     df_w['time'] = pd.to_datetime(df_w['time'])
     
-    # Parse Pollutants (OWM returns data in a 'list')
     pollutant_list = []
     for entry in pollution_res['list']:
         pollutant_list.append({
@@ -46,7 +42,7 @@ def get_forecast_features(trained_columns, latest_actuals):
         })
     df_p = pd.DataFrame(pollutant_list)
     
-    # Merge on nearest time (OWM might have different timestamps)
+    # Merge and Impute
     df_f = pd.merge_asof(df_w.sort_values('time'), df_p.sort_values('time'), on='time', direction='nearest')
     
     prep = pd.DataFrame({
@@ -60,9 +56,7 @@ def get_forecast_features(trained_columns, latest_actuals):
         'wind_speed': df_f['wind_speed_10m'].astype('float64')
     })
 
-    # Robust Imputation
     prep = prep.ffill().bfill().fillna(0.0)
-    
     for c in trained_columns:
         if c not in prep.columns:
             prep[c] = latest_actuals.get(c, 0.0)
@@ -74,13 +68,12 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
+    # FETCH DATA FROM karachi_aqi
     print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
-    full_df = fg.read()
+    full_df = fg.read().sort_values(['year', 'month', 'day', 'hour']).dropna()
     
-    full_df = full_df.sort_values(['year', 'month', 'day', 'hour']).dropna()
-    latest_row = full_df.iloc[-1]
-    latest_actuals = latest_row.to_dict()
+    latest_actuals = full_df.iloc[-1].to_dict()
     current_aqi = float(latest_actuals.get('aqi'))
 
     X = full_df.drop(columns=["aqi"])
@@ -92,26 +85,61 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    print("\n🔍 TUNING INDIVIDUAL MODELS...")
-    xgb_grid = GridSearchCV(XGBRegressor(random_state=42), {"n_estimators": [300], "max_depth": [3, 4]}, cv=3).fit(X_train_s, y_train)
-    svr_grid = GridSearchCV(SVR(), {"C": [1, 10], "kernel": ["rbf"]}, cv=3).fit(X_train_s, y_train)
-    rf_grid = GridSearchCV(RandomForestRegressor(random_state=42), {"n_estimators": [500], "max_depth": [8]}, cv=3).fit(X_train_s, y_train)
+    # --- STARTING TOURNAMENT WITH TUNING ---
+    print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
+    model_configs = {
+        'RandomForest': (RandomForestRegressor(random_state=42), 
+                         {"n_estimators": [500], "max_depth": [8, 12], "min_samples_leaf": [5]}),
+        'XGBoost': (XGBRegressor(random_state=42), 
+                    {"n_estimators": [300], "max_depth": [3, 5], "learning_rate": [0.05], "reg_lambda": [1]}),
+        'SVR': (SVR(), 
+                {"C": [1, 10], "epsilon": [0.1, 0.2], "kernel": ["rbf"]})
+    }
 
-    print("\n🤝 TRAINING ENSEMBLE...")
-    ensemble_model = VotingRegressor([('xgb', xgb_grid.best_estimator_), ('svr', svr_grid.best_estimator_), ('rf', rf_grid.best_estimator_)], weights=[2, 2, 1])
+    results = []
+    best_estimators = []
+
+    for name, (model, params) in model_configs.items():
+        print(f"--- Tuning {name} ---")
+        grid = GridSearchCV(model, params, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
+        grid.fit(X_train_s, y_train)
+        
+        best_m = grid.best_estimator_
+        best_estimators.append((name.lower(), best_m))
+        
+        tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
+        te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
+        gap = abs(tr_rmse - te_rmse)
+        
+        results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse, 'Gap': gap})
+        print(f"   Best Params: {grid.best_params_}")
+        print(f"   Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f} | Gap: {gap:.4f}")
+
+    # ANNOUNCE WINNER
+    res_df = pd.DataFrame(results).sort_values('Test RMSE')
+    winner = res_df.iloc[0]
+    print(f"\n🥇 TOURNAMENT WINNER: {winner['Model']} (RMSE: {winner['Test RMSE']:.4f})")
+
+    # --- CREATE AND TRAIN ENSEMBLE ---
+    print("\n🤝 TRAINING FINAL ENSEMBLE (Weighted Voting)...")
+    ensemble_model = VotingRegressor(best_estimators, weights=[1, 2, 2]) # Weighting XGB/SVR more
     ensemble_model.fit(X_train_s, y_train)
-    
-    test_rmse = root_mean_squared_error(y_test, ensemble_model.predict(X_test_s))
 
+    # SAVE TO MODEL REGISTRY (karachi_aqi_model)
     model_dir = "karachi_ensemble_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-    aqi_model = mr.python.create_model(name="karachi_aqi_model", metrics={"test_rmse": test_rmse}, description="Ensemble with OWM data.")
+    aqi_model = mr.python.create_model(
+        name="karachi_aqi_model",
+        metrics={"test_rmse": root_mean_squared_error(y_test, ensemble_model.predict(X_test_s))},
+        description="Ensemble of Tuned RF, XGB, and SVR using OWM Forecasts."
+    )
     aqi_model.save(model_dir)
 
+    # --- RECURSIVE FORECAST ---
     print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     predictions = []
@@ -125,14 +153,18 @@ def run_pipeline():
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
+    # STORE PREDICTIONS IN karachi_aqi_forecast v1
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    fg_forecast = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
+    fg_forecast = fs.get_or_create_feature_group(
+        name="karachi_aqi_forecast", version=1, 
+        primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
+    )
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
     
-    print("\n✅ Professional Pipeline complete using OpenWeatherMap.")
+    print("\n✅ Professional Pipeline complete with Tournament Results.")
 
 if __name__ == "__main__":
     run_pipeline()

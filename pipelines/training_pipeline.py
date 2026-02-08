@@ -69,27 +69,39 @@ def run_pipeline():
     y_train = y_train.loc[X_train.dropna().index]
     y_test = y_test.loc[X_test.dropna().index]
 
-    # ✅ IMPROVED TUNING: Adding min_samples_leaf and narrowing depth to stop overfitting
+    # ✅ ANTI-OVERFITTING SUITE: Applying strong regularization to all models
     models_to_train = [
         {
             "name": "RandomForest",
             "estimator": RandomForestRegressor(random_state=42),
             "params": {
-                "n_estimators": [300, 500], 
-                "max_depth": [10, 15],
-                "min_samples_leaf": [1, 2, 4],
-                "max_features": ["sqrt", "log2"]
+                "n_estimators": [500], 
+                "max_depth": [8, 12],
+                "min_samples_leaf": [5, 10], # Higher values prevent memorizing noise
+                "max_features": ["sqrt"],
+                "bootstrap": [True]
             }
         },
         {
             "name": "XGBoost",
-            "estimator": XGBRegressor(random_state=42),
-            "params": {"n_estimators": [100, 200], "max_depth": [3, 5], "learning_rate": [0.05, 0.1]}
+            "estimator": XGBRegressor(random_state=42, objective='reg:squarederror'),
+            "params": {
+                "n_estimators": [200, 300], 
+                "max_depth": [3, 4], # Shallow trees generalize better
+                "learning_rate": [0.01, 0.05],
+                "gamma": [0.1, 0.5], # Minimum loss reduction for a split
+                "reg_lambda": [1, 10], # L2 regularization on weights
+                "subsample": [0.8] # Train on 80% of data to reduce variance
+            }
         },
         {
             "name": "SVR",
             "estimator": SVR(),
-            "params": {"C": [1, 10, 100], "epsilon": [0.1, 0.2]}
+            "params": {
+                "C": [0.1, 1, 10], # Lower C = smoother decision surface
+                "epsilon": [0.1, 0.2],
+                "kernel": ["rbf"]
+            }
         }
     ]
 
@@ -97,7 +109,7 @@ def run_pipeline():
     best_rmse = float('inf')
     winning_model_name = ""
 
-    print("\n🏆 STARTING EXTENDED MODEL TOURNAMENT...")
+    print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     for m in models_to_train:
         grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
         grid.fit(X_train_s, y_train)
@@ -126,7 +138,7 @@ def run_pipeline():
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
-        description=f"Winner: {winning_model_name} trained on FG v4."
+        description=f"Regularized Winner: {winning_model_name} trained on FG v4."
     )
     aqi_model.save(model_dir)
 

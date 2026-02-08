@@ -13,6 +13,7 @@ from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import root_mean_squared_error
+from hsfs.model_schema import ModelSchema
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -77,10 +78,9 @@ def run_pipeline():
             "name": "RandomForest",
             "estimator": RandomForestRegressor(random_state=42),
             "params": {
-                "n_estimators": [100, 300, 500], 
-                "max_depth": [10, 20, 30, None],
-                "min_samples_split": [2, 5, 10],
-                "max_features": ["sqrt", "log2"]
+                "n_estimators": [100, 300], 
+                "max_depth": [10, 20],
+                "max_features": ["sqrt"]
             }
         },
         {
@@ -91,7 +91,7 @@ def run_pipeline():
         {
             "name": "SVR",
             "estimator": SVR(),
-            "params": {"C": [1, 10, 100], "epsilon": [0.01, 0.1, 0.2]}
+            "params": {"C": [1, 10, 100], "epsilon": [0.1, 0.2]}
         }
     ]
 
@@ -101,14 +101,12 @@ def run_pipeline():
 
     print("\n🏆 STARTING EXTENDED MODEL TOURNAMENT...")
     for m in models_to_train:
-        # ✅ YES: Hyperparameter Tuning via GridSearchCV
         grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
         grid.fit(X_train_s, y_train)
         
         train_rmse = root_mean_squared_error(y_train, grid.predict(X_train_s))
         test_rmse = root_mean_squared_error(y_test, grid.predict(X_test_s))
         
-        # ✅ YES: Printing Train/Test RMSE & Overfitting Gap
         print(f"--- {m['name']} ---")
         print(f"   Best Params: {grid.best_params_}")
         print(f"   Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
@@ -121,7 +119,10 @@ def run_pipeline():
 
     print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
 
-    # ✅ YES: Storing in Model Registry 'karachi_aqi_model'
+    # ✅ REGISTER MODEL WITH SCHEMA
+    input_example = X_train.sample(1)
+    model_schema = ModelSchema(X_train, y_train)
+
     model_dir = "karachi_aqi_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -131,6 +132,8 @@ def run_pipeline():
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
+        model_schema=model_schema,
+        input_example=input_example,
         description=f"Winner: {winning_model_name} trained on FG v4."
     )
     aqi_model.save(model_dir)
@@ -156,7 +159,6 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times)
 
-    # Calculate Daily Averages for the next 3 days
     daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date)['predicted_aqi'].mean()
     total_avg = daily_stats.mean()
 
@@ -166,13 +168,16 @@ def run_pipeline():
     
     print(f"\n⭐ TOTAL 3-DAY AVERAGE FORECAST: {total_avg:.2f}")
 
-    # ✅ YES: Uploading to 'karachi_aqi_forecast' Version 1
+    # ✅ FIX: Added write_options to prevent connection drops during job launch
     forecast_df['prediction_timestamp'] = forecast_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
-    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
+    
+    print("\n📤 Uploading forecast to Hopsworks...")
+    fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
+    
     print("\n✅ Professional Pipeline complete.")
 
 if __name__ == "__main__":

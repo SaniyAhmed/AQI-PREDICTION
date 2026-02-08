@@ -18,7 +18,7 @@ from sklearn.metrics import root_mean_squared_error
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
 def get_forecast_features(trained_columns, latest_actuals):
-    # ✅ YES: Fetches 3-day weather forecast for recursive prediction
+    # ✅ YES: Taking next 3 days forecast from Open-Meteo
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,pm2_5,pm10",
@@ -50,9 +50,9 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # ✅ YES: Pulls historical data from 'karachi_aqi'
-    fg = fs.get_feature_group(name="karachi_aqi", version=4)
-    full_df = fg.read()
+    # ✅ YES: Using Feature View 'karachi_aqi_view' Version 5
+    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
+    full_df, _ = fv.get_batch_data()
     
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
@@ -70,22 +70,27 @@ def run_pipeline():
     y_train = y_train.loc[X_train.dropna().index]
     y_test = y_test.loc[X_test.dropna().index]
 
-    # ✅ YES: HYPERPARAMETER TUNING & MULTI-MODEL TOURNAMENT
+    # ✅ YES: TOURNAMENT with 3 Models & Deep Random Forest Tuning
     models_to_train = [
+        {
+            "name": "RandomForest",
+            "estimator": RandomForestRegressor(random_state=42),
+            "params": {
+                "n_estimators": [100, 300, 500], 
+                "max_depth": [10, 20, 30, None],
+                "min_samples_split": [2, 5, 10],
+                "max_features": ["sqrt", "log2"]
+            }
+        },
         {
             "name": "XGBoost",
             "estimator": XGBRegressor(random_state=42),
             "params": {"n_estimators": [100, 200], "max_depth": [3, 5], "learning_rate": [0.05, 0.1]}
         },
         {
-            "name": "RandomForest",
-            "estimator": RandomForestRegressor(random_state=42),
-            "params": {"n_estimators": [50, 100], "max_depth": [5, 10]}
-        },
-        {
             "name": "SVR",
             "estimator": SVR(),
-            "params": {"C": [1, 10], "epsilon": [0.1, 0.2]}
+            "params": {"C": [1, 10, 100], "epsilon": [0.01, 0.1, 0.2]}
         }
     ]
 
@@ -93,22 +98,19 @@ def run_pipeline():
     best_rmse = float('inf')
     winning_model_name = ""
 
-    print("\n🏆 STARTING MODEL TOURNAMENT...")
+    print("\n🏆 STARTING EXTENDED MODEL TOURNAMENT...")
     for m in models_to_train:
-        grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error')
+        # ✅ YES: Hyperparameter Tuning via GridSearchCV
+        grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
         grid.fit(X_train_s, y_train)
         
-        # ✅ YES: PRINTING TRAIN/TEST RMSE TO SEE OVERFITTING GAP
-        train_pred = grid.predict(X_train_s)
-        test_pred = grid.predict(X_test_s)
+        train_rmse = root_mean_squared_error(y_train, grid.predict(X_train_s))
+        test_rmse = root_mean_squared_error(y_test, grid.predict(X_test_s))
         
-        train_rmse = root_mean_squared_error(y_train, train_pred)
-        test_rmse = root_mean_squared_error(y_test, test_pred)
-        
+        # ✅ YES: Printing Train/Test RMSE & Overfitting Gap
         print(f"--- {m['name']} ---")
         print(f"   Best Params: {grid.best_params_}")
-        print(f"   Train RMSE: {train_rmse:.4f}")
-        print(f"   Test RMSE:  {test_rmse:.4f}")
+        print(f"   Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
         print(f"   Overfitting Gap: {abs(train_rmse - test_rmse):.4f}")
 
         if test_rmse < best_rmse:
@@ -116,24 +118,23 @@ def run_pipeline():
             best_overall_model = grid.best_estimator_
             winning_model_name = m["name"]
 
-    print(f"\n🥇 WINNER: {winning_model_name} with RMSE {best_rmse:.4f}")
+    print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
 
-    # ✅ YES: STORING IN MODEL REGISTRY 'karachi_aqi_model'
+    # ✅ YES: Storing in Model Registry 'karachi_aqi_model' (Latest Version)
     model_dir = "karachi_aqi_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
-    
     joblib.dump(best_overall_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
-        description=f"Best model ({winning_model_name}) found during tuning."
+        description=f"Winner: {winning_model_name} from Feature View v5."
     )
     aqi_model.save(model_dir)
 
-    # 2. RECURSIVE MOMENTUM FORECAST
+    # 2. RECURSIVE FORECAST
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     predictions = []
     moving_state_aqi = current_aqi 
@@ -149,15 +150,23 @@ def run_pipeline():
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
-    # 3. ✅ YES: STORING IN FEATURE GROUP 'karachi_aqi_forecast'
+    # 3. ANALYSIS & AVERAGES
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
-    forecast_df['predicted_aqi'] = forecast_df['predicted_aqi'].astype('float64')
-    forecast_df['prediction_timestamp'] = times.dt.strftime('%Y-%m-%d %H:%M:%S')
+    forecast_df['prediction_timestamp'] = pd.to_datetime(times)
 
-    print("\n📊 DYNAMIC TREND FORECAST:")
-    print(forecast_df[['prediction_timestamp', 'predicted_aqi']].head(10).to_string(index=False))
+    # Calculate Daily Averages for the next 3 days
+    daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date)['predicted_aqi'].mean()
+    total_avg = daily_stats.mean()
 
+    print("\n📅 DAILY AQI AVERAGES (Forecasted):")
+    for date, avg in daily_stats.items():
+        print(f"   {date}: {avg:.2f}")
+    
+    print(f"\n⭐ TOTAL 3-DAY AVERAGE FORECAST: {total_avg:.2f}")
+
+    # ✅ YES: Uploading to 'karachi_aqi_forecast' Version 1
+    forecast_df['prediction_timestamp'] = forecast_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True

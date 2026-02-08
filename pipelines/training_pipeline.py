@@ -22,7 +22,6 @@ OWM_API_KEY = os.getenv('OWM_API_KEY')
 
 def get_forecast_features(trained_columns, latest_actuals):
     """Fetches weather from Open-Meteo and pollutants from OpenWeatherMap."""
-    # Setup resilient session
     session = requests.Session()
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
@@ -204,8 +203,11 @@ def run_pipeline():
     print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
     print("\n✅ Pipeline complete. Resilient connections used.")
     
-    # Final cleanup
-    project.close()
+    # 10. CLEANUP (Safe logout)
+    try:
+        hopsworks.logout()
+    except:
+        pass
 
 if __name__ == "__main__":
     run_pipeline()

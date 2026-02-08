@@ -56,8 +56,7 @@ def run_pipeline():
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
     current_aqi = float(latest_actuals.get('aqi'))
-    print(f"📡 Dynamically Fetched Current AQI: {current_aqi:.2f}")
-
+    
     X = full_df.drop(columns=["aqi"])
     y = full_df["aqi"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -69,120 +68,85 @@ def run_pipeline():
     y_train = y_train.loc[X_train.dropna().index]
     y_test = y_test.loc[X_test.dropna().index]
 
-    # ✅ ANTI-OVERFITTING SUITE: Applying strong regularization to all models
+    # --- REGULARIZED MODEL TOURNAMENT ---
     models_to_train = [
         {
             "name": "RandomForest",
-            "estimator": RandomForestRegressor(random_state=42),
+            "estimator": RandomForestRegressor(random_state=42, bootstrap=True),
             "params": {
                 "n_estimators": [500], 
-                "max_depth": [8, 12],
-                "min_samples_leaf": [5, 10], # Higher values prevent memorizing noise
+                "max_depth": [6, 8], 
+                "min_samples_split": [15], 
+                "min_samples_leaf": [10],
                 "max_features": ["sqrt"],
-                "bootstrap": [True]
-            }
-        },
-        {
-            "name": "XGBoost",
-            "estimator": XGBRegressor(random_state=42, objective='reg:squarederror'),
-            "params": {
-                "n_estimators": [200, 300], 
-                "max_depth": [3, 4], # Shallow trees generalize better
-                "learning_rate": [0.01, 0.05],
-                "gamma": [0.1, 0.5], # Minimum loss reduction for a split
-                "reg_lambda": [1, 10], # L2 regularization on weights
-                "subsample": [0.8] # Train on 80% of data to reduce variance
-            }
-        },
-        {
-            "name": "SVR",
-            "estimator": SVR(),
-            "params": {
-                "C": [0.1, 1, 10], # Lower C = smoother decision surface
-                "epsilon": [0.1, 0.2],
-                "kernel": ["rbf"]
+                "max_samples": [0.7],
+                "min_impurity_decrease": [0.01]
             }
         }
     ]
 
     best_overall_model = None
     best_rmse = float('inf')
-    winning_model_name = ""
 
-    print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     for m in models_to_train:
-        grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1)
+        grid = GridSearchCV(m["estimator"], m["params"], cv=5, scoring='neg_root_mean_squared_error', n_jobs=-1)
         grid.fit(X_train_s, y_train)
-        
-        train_rmse = root_mean_squared_error(y_train, grid.predict(X_train_s))
-        test_rmse = root_mean_squared_error(y_test, grid.predict(X_test_s))
-        
-        print(f"--- {m['name']} ---")
-        print(f"   Best Params: {grid.best_params_}")
-        print(f"   Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
-        print(f"   Overfitting Gap: {abs(train_rmse - test_rmse):.4f}")
+        best_overall_model = grid.best_estimator_
+        best_rmse = root_mean_squared_error(y_test, grid.predict(X_test_s))
 
-        if test_rmse < best_rmse:
-            best_rmse = test_rmse
-            best_overall_model = grid.best_estimator_
-            winning_model_name = m["name"]
-
-    print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
-
-    model_dir = "karachi_aqi_model"
-    if os.path.exists(model_dir): shutil.rmtree(model_dir)
-    os.makedirs(model_dir)
-    joblib.dump(best_overall_model, f"{model_dir}/model.pkl")
-    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
-
-    aqi_model = mr.python.create_model(
-        name="karachi_aqi_model",
-        metrics={"test_rmse": best_rmse},
-        description=f"Regularized Winner: {winning_model_name} trained on FG v4."
-    )
-    aqi_model.save(model_dir)
-
-    # 2. RECURSIVE FORECAST
+    # --- RECURSIVE FORECAST ---
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     predictions = []
     moving_state_aqi = current_aqi 
 
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
-        if 'aqi_lag_1' in row.columns:
-            row['aqi_lag_1'] = moving_state_aqi
+        if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
         
         suggestion = best_overall_model.predict(scaler.transform(row))[0]
-        momentum = 0.85 
-        next_step = (moving_state_aqi * momentum) + (suggestion * (1 - momentum))
+        next_step = (moving_state_aqi * 0.85) + (suggestion * 0.15)
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
-    # 3. ANALYSIS & AVERAGES
+    # --- PREPARING DATA FOR UPLOAD ---
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times)
 
-    daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date)['predicted_aqi'].mean()
-    total_avg = daily_stats.mean()
+    # 1. Prepare Hourly Data (Convert timestamp to string for Hopsworks)
+    hourly_upload_df = forecast_df.copy()
+    hourly_upload_df['prediction_timestamp'] = hourly_upload_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    print("\n📅 DAILY AQI AVERAGES (Forecasted):")
-    for date, avg in daily_stats.items():
-        print(f"   {date}: {avg:.2f}")
+    # 2. Prepare Daily Average Data
+    daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date).agg({
+        'predicted_aqi': 'mean',
+        'year': 'first',
+        'month': 'first',
+        'day': 'first'
+    }).reset_index()
+    daily_stats.rename(columns={'prediction_timestamp': 'date', 'predicted_aqi': 'daily_avg_aqi'}, inplace=True)
+    daily_stats['date'] = daily_stats['date'].astype(str) # Primary key compatibility
+
+    # --- HOPSWORKS UPLOADS ---
     
-    print(f"\n⭐ TOTAL 3-DAY AVERAGE FORECAST: {total_avg:.2f}")
-
-    # ✅ FINAL UPLOAD
-    forecast_df['prediction_timestamp'] = forecast_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Upload Hourly Predictions
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
+    print("📤 Uploading hourly forecast...")
+    fg_forecast.insert(hourly_upload_df, write_options={"wait_for_job": False})
+
+    # Upload Daily Averages (The missing part!)
+    fg_daily = fs.get_or_create_feature_group(
+        name="karachi_aqi_daily_summary", version=1,
+        description="Daily aggregated average AQI forecasts for Karachi.",
+        primary_key=['date'], online_enabled=True
+    )
+    print("📊 Uploading daily average summary...")
+    fg_daily.insert(daily_stats, write_options={"wait_for_job": False})
     
-    print("\n📤 Uploading forecast to Hopsworks...")
-    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
-    
-    print("\n✅ Professional Pipeline complete.")
+    print("\n✅ Hourly and Daily data successfully pushed to Hopsworks.")
 
 if __name__ == "__main__":
     run_pipeline()

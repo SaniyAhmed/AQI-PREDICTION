@@ -18,7 +18,6 @@ from sklearn.metrics import root_mean_squared_error
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
 def get_forecast_features(trained_columns, latest_actuals):
-    # ✅ YES: Taking next 3 days forecast from Open-Meteo
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,pm2_5,pm10",
@@ -50,7 +49,6 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # ✅ YES: Pulling training data from Feature Group 'karachi_aqi' version 4
     print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
     full_df = fg.read()
@@ -71,15 +69,16 @@ def run_pipeline():
     y_train = y_train.loc[X_train.dropna().index]
     y_test = y_test.loc[X_test.dropna().index]
 
-    # ✅ YES: TOURNAMENT with 3 Models & Deep Random Forest Tuning
+    # ✅ IMPROVED TUNING: Adding min_samples_leaf and narrowing depth to stop overfitting
     models_to_train = [
         {
             "name": "RandomForest",
             "estimator": RandomForestRegressor(random_state=42),
             "params": {
-                "n_estimators": [100, 300], 
-                "max_depth": [10, 20],
-                "max_features": ["sqrt"]
+                "n_estimators": [300, 500], 
+                "max_depth": [10, 15],
+                "min_samples_leaf": [1, 2, 4],
+                "max_features": ["sqrt", "log2"]
             }
         },
         {
@@ -118,14 +117,12 @@ def run_pipeline():
 
     print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
 
-    # ✅ Save Local Files
     model_dir = "karachi_aqi_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     joblib.dump(best_overall_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-    # ✅ REGISTER MODEL (Using standard schema inference)
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
@@ -171,7 +168,6 @@ def run_pipeline():
     )
     
     print("\n📤 Uploading forecast to Hopsworks...")
-    # Using simple insert options to avoid remote timeout errors
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
     
     print("\n✅ Professional Pipeline complete.")

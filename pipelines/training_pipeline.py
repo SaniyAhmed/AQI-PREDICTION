@@ -2,6 +2,8 @@ import os
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 import hopsworks
 import joblib
@@ -16,19 +18,23 @@ from sklearn.metrics import root_mean_squared_error
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
-OWM_API_KEY = os.getenv('OWM_API_KEY') 
+OWM_API_KEY = os.getenv('OWM_API_KEY')
 
 def get_forecast_features(trained_columns, latest_actuals):
     """Fetches weather from Open-Meteo and pollutants from OpenWeatherMap."""
-    # FIXED URL: api.open-meteo.com
-    weather_res = requests.get("https://api.open-meteo.com/v1/forecast", params={
+    # Setup resilient session
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+
+    weather_res = session.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
         "forecast_days": 3
     }).json()
     
     pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution/forecast?lat={KARACHI_LAT}&lon={KARACHI_LON}&appid={OWM_API_KEY}"
-    pollution_res = requests.get(pollution_url).json()
+    pollution_res = session.get(pollution_url).json()
     
     df_w = pd.DataFrame(weather_res["hourly"])
     df_w['time'] = pd.to_datetime(df_w['time'])
@@ -83,15 +89,15 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT: HEAVY REGULARIZATION TO STOP RF OVERFITTING
+    # 2. TOURNAMENT: HEAVY REGULARIZATION
     print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
             "n_estimators": [500], 
-            "max_depth": [6, 8],          # Reduced depth to fight overfitting
-            "min_samples_leaf": [10, 20],  # Increased to generalize better
+            "max_depth": [6, 8],
+            "min_samples_leaf": [10, 20],
             "max_features": ["sqrt"],
-            "ccp_alpha": [0.05, 0.1]       # Stronger pruning
+            "ccp_alpha": [0.05, 0.1]
         }),
         'XGBoost': (XGBRegressor(random_state=42), {
             "n_estimators": [300], 
@@ -160,7 +166,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 8. DAILY & GRAND SUMMARY PREP (Corrected iteration)
+    # 8. DAILY & GRAND SUMMARY PREP
     full_prediction_series = pd.Series(predictions)
     grand_avg = round(full_prediction_series.mean(), 2)
     times_dt = pd.to_datetime(times)
@@ -177,21 +183,18 @@ def run_pipeline():
     summary_df = pd.DataFrame(summary_data)
 
     # 9. UPLOAD TO HOPSWORKS
-    # A. Save Hourly
+    print("📤 Uploading Forecasts to Hopsworks...")
     fg_forecast = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
 
-    # B. Save Daily Summaries
     target_version = 1
     try:
         fg_summary = fs.get_or_create_feature_group(
             name="karachi_aqi_daily_summary", version=target_version,
-            primary_key=['date'], online_enabled=True,
-            description="Daily and 3-day Grand Average AQI forecasts."
+            primary_key=['date'], online_enabled=True
         )
         fg_summary.insert(summary_df, write_options={"wait_for_job": False})
-    except Exception as e:
-        print(f"⚠️ Version {target_version} fallback. Creating/Updating next version.")
+    except Exception:
         fg_summary = fs.get_or_create_feature_group(
             name="karachi_aqi_daily_summary", version=target_version + 1,
             primary_key=['date'], online_enabled=True
@@ -199,7 +202,10 @@ def run_pipeline():
         fg_summary.insert(summary_df, write_options={"wait_for_job": False})
     
     print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
-    print("\n✅ Pipeline complete. API URL fixed and summaries stored.")
+    print("\n✅ Pipeline complete. Resilient connections used.")
+    
+    # Final cleanup
+    project.close()
 
 if __name__ == "__main__":
     run_pipeline()

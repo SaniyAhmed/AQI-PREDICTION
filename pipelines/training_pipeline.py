@@ -50,12 +50,10 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
-    # ✅ YES: Using Feature View 'karachi_aqi_view' Version 5
-    print("🎬 Initializing Feature View...")
-    fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-    
-    # ✅ FIX: Removed the extra unpacking variable causing the ValueError
-    full_df = fv.get_batch_data()
+    # ✅ YES: Pulling training data from Feature Group 'karachi_aqi' version 4
+    print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
+    fg = fs.get_feature_group(name="karachi_aqi", version=4)
+    full_df = fg.read()
     
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
@@ -133,7 +131,7 @@ def run_pipeline():
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
-        description=f"Winner: {winning_model_name} tuned on FV v5."
+        description=f"Winner: {winning_model_name} trained on FG v4."
     )
     aqi_model.save(model_dir)
 
@@ -158,7 +156,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times)
 
-    # Calculate Daily Averages
+    # Calculate Daily Averages for the next 3 days
     daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date)['predicted_aqi'].mean()
     total_avg = daily_stats.mean()
 

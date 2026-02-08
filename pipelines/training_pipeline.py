@@ -51,8 +51,11 @@ def run_pipeline():
     mr = project.get_model_registry()
     
     # ✅ YES: Using Feature View 'karachi_aqi_view' Version 5
+    print("🎬 Initializing Feature View...")
     fv = fs.get_feature_view(name="karachi_aqi_view", version=5)
-    full_df, _ = fv.get_batch_data()
+    
+    # ✅ FIX: Removed the extra unpacking variable causing the ValueError
+    full_df = fv.get_batch_data()
     
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
@@ -120,7 +123,7 @@ def run_pipeline():
 
     print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
 
-    # ✅ YES: Storing in Model Registry 'karachi_aqi_model' (Latest Version)
+    # ✅ YES: Storing in Model Registry 'karachi_aqi_model'
     model_dir = "karachi_aqi_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
@@ -130,7 +133,7 @@ def run_pipeline():
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
-        description=f"Winner: {winning_model_name} from Feature View v5."
+        description=f"Winner: {winning_model_name} tuned on FV v5."
     )
     aqi_model.save(model_dir)
 
@@ -155,7 +158,7 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times)
 
-    # Calculate Daily Averages for the next 3 days
+    # Calculate Daily Averages
     daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date)['predicted_aqi'].mean()
     total_avg = daily_stats.mean()
 

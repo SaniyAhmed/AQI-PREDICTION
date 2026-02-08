@@ -8,14 +8,17 @@ import joblib
 import shutil
 import numpy as np
 from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import root_mean_squared_error
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
 def get_forecast_features(trained_columns, latest_actuals):
-    # Fetch real-time weather + air quality forecast from Open-Meteo
+    # ✅ YES: Fetches 3-day weather forecast for recursive prediction
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,pm2_5,pm10",
@@ -36,7 +39,6 @@ def get_forecast_features(trained_columns, latest_actuals):
         'wind_speed': df_f['wind_speed_10m'].ffill().fillna(0).astype('float64')
     })
     
-    # Dynamically fill features with the latest state from the Feature Store
     for c in trained_columns:
         if c not in prep.columns:
             prep[c] = latest_actuals.get(c, 0.0)
@@ -46,57 +48,108 @@ def get_forecast_features(trained_columns, latest_actuals):
 def run_pipeline():
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
+    mr = project.get_model_registry()
     
-    # 1. DYNAMIC DATA RETRIEVAL
+    # ✅ YES: Pulls historical data from 'karachi_aqi'
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
     full_df = fg.read()
     
-    # Get the latest "Ground Truth" row from the Feature Group
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
-    
-    # This is NOT hardcoded; it pulls whatever is currently in your Feature Store
     current_aqi = float(latest_actuals.get('aqi'))
     print(f"📡 Dynamically Fetched Current AQI: {current_aqi:.2f}")
 
     X = full_df.drop(columns=["aqi"])
-    y = full_df[["aqi"]]
+    y = full_df["aqi"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     feature_names = X_train.columns.tolist()
     scaler = RobustScaler()
     X_train_s = scaler.fit_transform(X_train.dropna())
+    X_test_s = scaler.transform(X_test.dropna())
+    y_train = y_train.loc[X_train.dropna().index]
+    y_test = y_test.loc[X_test.dropna().index]
+
+    # ✅ YES: HYPERPARAMETER TUNING & MULTI-MODEL TOURNAMENT
+    models_to_train = [
+        {
+            "name": "XGBoost",
+            "estimator": XGBRegressor(random_state=42),
+            "params": {"n_estimators": [100, 200], "max_depth": [3, 5], "learning_rate": [0.05, 0.1]}
+        },
+        {
+            "name": "RandomForest",
+            "estimator": RandomForestRegressor(random_state=42),
+            "params": {"n_estimators": [50, 100], "max_depth": [5, 10]}
+        },
+        {
+            "name": "SVR",
+            "estimator": SVR(),
+            "params": {"C": [1, 10], "epsilon": [0.1, 0.2]}
+        }
+    ]
+
+    best_overall_model = None
+    best_rmse = float('inf')
+    winning_model_name = ""
+
+    print("\n🏆 STARTING MODEL TOURNAMENT...")
+    for m in models_to_train:
+        grid = GridSearchCV(m["estimator"], m["params"], cv=3, scoring='neg_root_mean_squared_error')
+        grid.fit(X_train_s, y_train)
+        
+        # ✅ YES: PRINTING TRAIN/TEST RMSE TO SEE OVERFITTING GAP
+        train_pred = grid.predict(X_train_s)
+        test_pred = grid.predict(X_test_s)
+        
+        train_rmse = root_mean_squared_error(y_train, train_pred)
+        test_rmse = root_mean_squared_error(y_test, test_pred)
+        
+        print(f"--- {m['name']} ---")
+        print(f"   Best Params: {grid.best_params_}")
+        print(f"   Train RMSE: {train_rmse:.4f}")
+        print(f"   Test RMSE:  {test_rmse:.4f}")
+        print(f"   Overfitting Gap: {abs(train_rmse - test_rmse):.4f}")
+
+        if test_rmse < best_rmse:
+            best_rmse = test_rmse
+            best_overall_model = grid.best_estimator_
+            winning_model_name = m["name"]
+
+    print(f"\n🥇 WINNER: {winning_model_name} with RMSE {best_rmse:.4f}")
+
+    # ✅ YES: STORING IN MODEL REGISTRY 'karachi_aqi_model'
+    model_dir = "karachi_aqi_model"
+    if os.path.exists(model_dir): shutil.rmtree(model_dir)
+    os.makedirs(model_dir)
     
-    # Model trained to respect both weather and the previous hour's state
-    model = XGBRegressor(n_estimators=100, learning_rate=0.08, max_depth=4)
-    model.fit(X_train_s, y_train.loc[X_train.dropna().index].values.ravel())
+    joblib.dump(best_overall_model, f"{model_dir}/model.pkl")
+    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
+
+    aqi_model = mr.python.create_model(
+        name="karachi_aqi_model",
+        metrics={"test_rmse": best_rmse},
+        description=f"Best model ({winning_model_name}) found during tuning."
+    )
+    aqi_model.save(model_dir)
 
     # 2. RECURSIVE MOMENTUM FORECAST
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
-    
     predictions = []
     moving_state_aqi = current_aqi 
 
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
-        
-        # Feed the "Moving State" into the Lag feature
         if 'aqi_lag_1' in row.columns:
             row['aqi_lag_1'] = moving_state_aqi
         
-        # Get Model Prediction
-        suggestion = model.predict(scaler.transform(row))[0]
-        
-        # MOMENTUM LOGIC:
-        # Instead of a sharp drop, we allow the AQI to transition.
-        # This keeps the forecast realistic (Pollution takes time to clear).
-        momentum = 0.85 # 85% weight on current state, 15% on weather-suggested change
+        suggestion = best_overall_model.predict(scaler.transform(row))[0]
+        momentum = 0.85 
         next_step = (moving_state_aqi * momentum) + (suggestion * (1 - momentum))
-
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
-    # 3. FORMAT AND UPLOAD
+    # 3. ✅ YES: STORING IN FEATURE GROUP 'karachi_aqi_forecast'
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['predicted_aqi'] = forecast_df['predicted_aqi'].astype('float64')

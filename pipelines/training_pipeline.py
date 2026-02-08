@@ -13,7 +13,6 @@ from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import root_mean_squared_error
-from hsfs.model_schema import ModelSchema
 
 # --- CONFIG ---
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
@@ -119,21 +118,17 @@ def run_pipeline():
 
     print(f"\n🥇 TOURNAMENT WINNER: {winning_model_name} (RMSE: {best_rmse:.4f})")
 
-    # ✅ REGISTER MODEL WITH SCHEMA
-    input_example = X_train.sample(1)
-    model_schema = ModelSchema(X_train, y_train)
-
+    # ✅ Save Local Files
     model_dir = "karachi_aqi_model"
     if os.path.exists(model_dir): shutil.rmtree(model_dir)
     os.makedirs(model_dir)
     joblib.dump(best_overall_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
+    # ✅ REGISTER MODEL (Using standard schema inference)
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics={"test_rmse": best_rmse},
-        model_schema=model_schema,
-        input_example=input_example,
         description=f"Winner: {winning_model_name} trained on FG v4."
     )
     aqi_model.save(model_dir)
@@ -168,7 +163,7 @@ def run_pipeline():
     
     print(f"\n⭐ TOTAL 3-DAY AVERAGE FORECAST: {total_avg:.2f}")
 
-    # ✅ FIX: Added write_options to prevent connection drops during job launch
+    # ✅ FINAL UPLOAD
     forecast_df['prediction_timestamp'] = forecast_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
@@ -176,7 +171,8 @@ def run_pipeline():
     )
     
     print("\n📤 Uploading forecast to Hopsworks...")
-    fg_forecast.insert(forecast_df, write_options={"start_offline_materialization": False, "wait_for_job": False})
+    # Using simple insert options to avoid remote timeout errors
+    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
     
     print("\n✅ Professional Pipeline complete.")
 

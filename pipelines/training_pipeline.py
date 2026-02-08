@@ -8,7 +8,7 @@ import joblib
 import shutil
 import numpy as np
 from xgboost import XGBRegressor
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, VotingRegressor
 from sklearn.svm import SVR
 from sklearn.preprocessing import RobustScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -18,6 +18,7 @@ from sklearn.metrics import root_mean_squared_error
 KARACHI_LAT, KARACHI_LON = 24.8607, 67.0011
 
 def get_forecast_features(trained_columns, latest_actuals):
+    # 1. TAKING NEXT THREE DAYS FORECAST FROM OPEN METEO
     res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,pm2_5,pm10",
@@ -49,6 +50,7 @@ def run_pipeline():
     fs = project.get_feature_store()
     mr = project.get_model_registry()
     
+    # 2. TAKING DATA FROM HOPSWORK FEATURE GROUP karachi_aqi (v4)
     print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
     full_df = fg.read()
@@ -56,7 +58,7 @@ def run_pipeline():
     latest_row = full_df.sort_values(['year', 'month', 'day', 'hour']).iloc[-1]
     latest_actuals = latest_row.to_dict()
     current_aqi = float(latest_actuals.get('aqi'))
-    
+
     X = full_df.drop(columns=["aqi"])
     y = full_df["aqi"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -68,33 +70,65 @@ def run_pipeline():
     y_train = y_train.loc[X_train.dropna().index]
     y_test = y_test.loc[X_test.dropna().index]
 
-    # --- REGULARIZED MODEL TOURNAMENT ---
-    models_to_train = [
-        {
-            "name": "RandomForest",
-            "estimator": RandomForestRegressor(random_state=42, bootstrap=True),
-            "params": {
-                "n_estimators": [500], 
-                "max_depth": [6, 8], 
-                "min_samples_split": [15], 
-                "min_samples_leaf": [10],
-                "max_features": ["sqrt"],
-                "max_samples": [0.7],
-                "min_impurity_decrease": [0.01]
-            }
-        }
-    ]
+    # 3. HYPERPARAMETER TUNING FOR ALL THREE MODELS
+    print("\n🔍 TUNING INDIVIDUAL MODELS...")
+    
+    # XGBoost Tuning
+    xgb_grid = GridSearchCV(
+        XGBRegressor(objective='reg:squarederror', random_state=42),
+        {"n_estimators": [300], "max_depth": [3, 4], "learning_rate": [0.05], "subsample": [0.8]},
+        cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1
+    ).fit(X_train_s, y_train)
 
-    best_overall_model = None
-    best_rmse = float('inf')
+    # SVR Tuning
+    svr_grid = GridSearchCV(
+        SVR(),
+        {"C": [1, 10], "epsilon": [0.1, 0.2], "kernel": ["rbf"]},
+        cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1
+    ).fit(X_train_s, y_train)
 
-    for m in models_to_train:
-        grid = GridSearchCV(m["estimator"], m["params"], cv=5, scoring='neg_root_mean_squared_error', n_jobs=-1)
-        grid.fit(X_train_s, y_train)
-        best_overall_model = grid.best_estimator_
-        best_rmse = root_mean_squared_error(y_test, grid.predict(X_test_s))
+    # Random Forest Tuning
+    rf_grid = GridSearchCV(
+        RandomForestRegressor(random_state=42),
+        {"n_estimators": [500], "max_depth": [8, 10], "min_samples_leaf": [10], "max_features": ["sqrt"]},
+        cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1
+    ).fit(X_train_s, y_train)
 
-    # --- RECURSIVE FORECAST ---
+    # 4. TRAINING ENSEMBLE WITH TUNED MODELS
+    print("\n🤝 TRAINING ENSEMBLE (VOTING REGRESSOR)...")
+    ensemble_model = VotingRegressor(
+        estimators=[
+            ('xgb', xgb_grid.best_estimator_), 
+            ('svr', svr_grid.best_estimator_), 
+            ('rf', rf_grid.best_estimator_)
+        ],
+        weights=[2, 2, 1] 
+    )
+    ensemble_model.fit(X_train_s, y_train)
+    
+    # 5. PRINTING TRAIN/TEST RMSE & OVERFITTING GAP
+    train_rmse = root_mean_squared_error(y_train, ensemble_model.predict(X_train_s))
+    test_rmse = root_mean_squared_error(y_test, ensemble_model.predict(X_test_s))
+    
+    print(f"--- Ensemble Performance ---")
+    print(f"   Train RMSE: {train_rmse:.4f} | Test RMSE: {test_rmse:.4f}")
+    print(f"   Overfitting Gap: {abs(train_rmse - test_rmse):.4f}")
+
+    # 6. STORING ENSEMBLE IN MODEL REGISTRY karachi_aqi_model
+    model_dir = "karachi_ensemble_model"
+    if os.path.exists(model_dir): shutil.rmtree(model_dir)
+    os.makedirs(model_dir)
+    joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
+    joblib.dump(scaler, f"{model_dir}/scaler.pkl")
+
+    aqi_model = mr.python.create_model(
+        name="karachi_aqi_model",
+        metrics={"test_rmse": test_rmse},
+        description="Best-in-class Ensemble (Tuned XGB, SVR, RF)."
+    )
+    aqi_model.save(model_dir)
+
+    # 7. RECURSIVE FORECAST
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     predictions = []
     moving_state_aqi = current_aqi 
@@ -103,50 +137,25 @@ def run_pipeline():
         row = X_f_base.iloc[[i]].copy()
         if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
         
-        suggestion = best_overall_model.predict(scaler.transform(row))[0]
+        suggestion = ensemble_model.predict(scaler.transform(row))[0]
         next_step = (moving_state_aqi * 0.85) + (suggestion * 0.15)
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 
-    # --- PREPARING DATA FOR UPLOAD ---
+    # 8. STORING PREDICTIONS IN karachi_aqi_forecast v1
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
-    forecast_df['prediction_timestamp'] = pd.to_datetime(times)
+    forecast_df['prediction_timestamp'] = pd.to_datetime(times).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 1. Prepare Hourly Data (Convert timestamp to string for Hopsworks)
-    hourly_upload_df = forecast_df.copy()
-    hourly_upload_df['prediction_timestamp'] = hourly_upload_df['prediction_timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-    # 2. Prepare Daily Average Data
-    daily_stats = forecast_df.groupby(forecast_df['prediction_timestamp'].dt.date).agg({
-        'predicted_aqi': 'mean',
-        'year': 'first',
-        'month': 'first',
-        'day': 'first'
-    }).reset_index()
-    daily_stats.rename(columns={'prediction_timestamp': 'date', 'predicted_aqi': 'daily_avg_aqi'}, inplace=True)
-    daily_stats['date'] = daily_stats['date'].astype(str) # Primary key compatibility
-
-    # --- HOPSWORKS UPLOADS ---
-    
-    # Upload Hourly Predictions
     fg_forecast = fs.get_or_create_feature_group(
         name="karachi_aqi_forecast", version=1, 
         primary_key=['year', 'month', 'day', 'hour'], online_enabled=True
     )
-    print("📤 Uploading hourly forecast...")
-    fg_forecast.insert(hourly_upload_df, write_options={"wait_for_job": False})
-
-    # Upload Daily Averages (The missing part!)
-    fg_daily = fs.get_or_create_feature_group(
-        name="karachi_aqi_daily_summary", version=1,
-        description="Daily aggregated average AQI forecasts for Karachi.",
-        primary_key=['date'], online_enabled=True
-    )
-    print("📊 Uploading daily average summary...")
-    fg_daily.insert(daily_stats, write_options={"wait_for_job": False})
     
-    print("\n✅ Hourly and Daily data successfully pushed to Hopsworks.")
+    print("\n📤 Uploading forecast to Hopsworks...")
+    fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
+    
+    print("\n✅ Professional Ensemble Pipeline complete.")
 
 if __name__ == "__main__":
     run_pipeline()

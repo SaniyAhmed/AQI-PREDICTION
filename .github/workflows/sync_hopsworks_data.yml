@@ -3,9 +3,9 @@ name: Sync Hopsworks Data
 on:
   schedule:
     - cron: '0 * * * *'  # Every hour
-  workflow_dispatch: 
+  workflow_dispatch:  # Manual trigger
 
-# ✅ Granting explicit write permission to the GITHUB_TOKEN
+# Granting explicit write permission to the GITHUB_TOKEN
 permissions:
   contents: write
 
@@ -17,7 +17,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          # Required to push back to the repo
           token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Set up Python
@@ -27,13 +26,12 @@ jobs:
       
       - name: Install dependencies
         run: |
-          # 4.2.* is the magic version for your backend!
           pip install "hopsworks==4.2.*" pandas pyarrow
       
       - name: Download data from Hopsworks
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
-        run: python app/download_hopsworks_data.py
+        run: python scripts/download_hopsworks_data.py
       
       - name: Commit and push changes
         run: |
@@ -43,8 +41,9 @@ jobs:
           
           # Only commit and push if the file actually changed
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "✅ No changes to commit - data is up to date"
           else
-            git commit -m "Auto-update forecast data [skip ci]"
+            git commit -m "🔄 Auto-update forecast data [skip ci]"
             git push origin main
+            echo "✅ Successfully pushed updated forecast data"
           fi

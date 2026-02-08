@@ -20,7 +20,8 @@ OWM_API_KEY = os.getenv('OWM_API_KEY')
 
 def get_forecast_features(trained_columns, latest_actuals):
     """Fetches weather from Open-Meteo and pollutants from OpenWeatherMap."""
-    weather_res = requests.get("https://api.api-meteo.com/v1/forecast", params={
+    # FIXED URL: api.open-meteo.com
+    weather_res = requests.get("https://api.open-meteo.com/v1/forecast", params={
         "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
         "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m",
         "forecast_days": 3
@@ -82,15 +83,15 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT: ANTI-OVERFITTING STRATEGIES
+    # 2. TOURNAMENT: HEAVY REGULARIZATION TO STOP RF OVERFITTING
     print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
             "n_estimators": [500], 
-            "max_depth": [8, 10], 
-            "min_samples_leaf": [5, 10],
+            "max_depth": [6, 8],          # Reduced depth to fight overfitting
+            "min_samples_leaf": [10, 20],  # Increased to generalize better
             "max_features": ["sqrt"],
-            "ccp_alpha": [0.01, 0.1] 
+            "ccp_alpha": [0.05, 0.1]       # Stronger pruning
         }),
         'XGBoost': (XGBRegressor(random_state=42), {
             "n_estimators": [300], 
@@ -112,8 +113,9 @@ def run_pipeline():
         
         tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
         te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
-        results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse, 'Gap': abs(tr_rmse - te_rmse)})
-        print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f} | Gap: {abs(tr_rmse - te_rmse):.4f}")
+        gap = abs(tr_rmse - te_rmse)
+        results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse, 'Gap': gap})
+        print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f} | Gap: {gap:.4f}")
 
     res_df = pd.DataFrame(results).sort_values('Test RMSE')
     winner_name = res_df.iloc[0]['Model']
@@ -158,16 +160,14 @@ def run_pipeline():
     forecast_df['predicted_aqi'] = [round(p, 2) for p in predictions]
     forecast_df['prediction_timestamp'] = pd.to_datetime(times).dt.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 8. DAILY & GRAND SUMMARY PREP (FIXED ITERATION)
+    # 8. DAILY & GRAND SUMMARY PREP (Corrected iteration)
     full_prediction_series = pd.Series(predictions)
     grand_avg = round(full_prediction_series.mean(), 2)
     times_dt = pd.to_datetime(times)
-    
-    # Corrected Grouping and Iteration
     daily_groups = full_prediction_series.groupby(times_dt.dt.date)
     
     summary_data = []
-    for date, group in daily_groups: # FIXED: Removed .items()
+    for date, group in daily_groups:
         summary_data.append({
             "date": str(date),
             "daily_avg_aqi": round(group.mean(), 2),
@@ -181,10 +181,9 @@ def run_pipeline():
     fg_forecast = fs.get_or_create_feature_group(name="karachi_aqi_forecast", version=1, primary_key=['year', 'month', 'day', 'hour'], online_enabled=True)
     fg_forecast.insert(forecast_df, write_options={"wait_for_job": False})
 
-    # B. Save Daily Summaries (With versioning fallback)
+    # B. Save Daily Summaries
     target_version = 1
     try:
-        # We try to get version 1. If schema mismatch occurs on insert, we bump it.
         fg_summary = fs.get_or_create_feature_group(
             name="karachi_aqi_daily_summary", version=target_version,
             primary_key=['date'], online_enabled=True,
@@ -192,7 +191,7 @@ def run_pipeline():
         )
         fg_summary.insert(summary_df, write_options={"wait_for_job": False})
     except Exception as e:
-        print(f"⚠️ Version {target_version} failed or schema mismatch. Creating Version {target_version + 1}.")
+        print(f"⚠️ Version {target_version} fallback. Creating/Updating next version.")
         fg_summary = fs.get_or_create_feature_group(
             name="karachi_aqi_daily_summary", version=target_version + 1,
             primary_key=['date'], online_enabled=True
@@ -200,7 +199,7 @@ def run_pipeline():
         fg_summary.insert(summary_df, write_options={"wait_for_job": False})
     
     print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
-    print("\n✅ All Requirements fulfilled. Pipeline clean.")
+    print("\n✅ Pipeline complete. API URL fixed and summaries stored.")
 
 if __name__ == "__main__":
     run_pipeline()

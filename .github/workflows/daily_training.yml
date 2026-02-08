@@ -34,6 +34,7 @@ jobs:
       - name: Run Training Pipeline
         env:
           MY_HOPSWORK_KEY: ${{ secrets.MY_HOPSWORKS_KEY }}
+          OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
           HSFS_DISABLE_FLIGHT_CLIENT: "True"
         run: |
           python pipelines/training_pipeline.py

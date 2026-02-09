@@ -249,14 +249,14 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         ensemble_rmse = float(model_info['ensemble_rmse']) if model_info['ensemble_rmse'] != "N/A" else None
         winner_name = model_info.get('winner', 'N/A')
         
-        # Create model comparison table
+        # Create model comparison table with formatted strings
         model_data = {
             "Model": ["RandomForest", "XGBoost", "SVR", "Ensemble (Voting)"],
             "Test RMSE": [
-                round(rf_rmse, 4) if rf_rmse else "N/A",
-                round(xgb_rmse, 4) if xgb_rmse else "N/A",
-                round(svr_rmse, 4) if svr_rmse else "N/A",
-                round(ensemble_rmse, 4) if ensemble_rmse else "N/A"
+                f"{rf_rmse:.4f}" if rf_rmse else "N/A",
+                f"{xgb_rmse:.4f}" if xgb_rmse else "N/A",
+                f"{svr_rmse:.4f}" if svr_rmse else "N/A",
+                f"{ensemble_rmse:.4f}" if ensemble_rmse else "N/A"
             ],
             "Status": ["Individual", "Individual", "Individual", "✅ Deployed"]
         }
@@ -277,11 +277,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             hide_index=True,
             column_config={
                 "Model": st.column_config.TextColumn("Model Name", width="medium"),
-                "Test RMSE": st.column_config.NumberColumn(
-                    "Test RMSE",
-                    width="small",
-                    format="%.4f"
-                ),
+                "Test RMSE": st.column_config.TextColumn("Test RMSE", width="small"),
                 "Status": st.column_config.TextColumn("Status", width="medium")
             }
         )
@@ -289,7 +285,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         # Add explanation
         if ensemble_rmse:
             best_individual = min([r for r in [rf_rmse, xgb_rmse, svr_rmse] if r is not None])
-            st.caption(f"💡 **Ensemble RMSE: {round(ensemble_rmse, 4)}** | **Best Individual RMSE: {round(best_individual, 4)}** | Lower RMSE = Better Performance")
+            st.caption(f"💡 **Ensemble RMSE: {ensemble_rmse:.4f}** | **Best Individual RMSE: {best_individual:.4f}** | Lower RMSE = Better Performance")
     else:
         st.info("Model performance metrics will be displayed here once the training pipeline completes and saves metrics to the model registry.")
     

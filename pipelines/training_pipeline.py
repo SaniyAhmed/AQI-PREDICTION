@@ -111,7 +111,9 @@ def run_pipeline():
     }
 
     results, best_estimators = [], []
-    individual_rmses = {} 
+    # Dictionary to hold the RMSEs of all individual models
+    individual_rmses = {}
+
     for name, (model, params) in model_configs.items():
         grid = GridSearchCV(model, params, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1).fit(X_train_s, y_train)
         best_m = grid.best_estimator_
@@ -120,18 +122,20 @@ def run_pipeline():
         tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
         te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
         
-        individual_rmses[f"{name.lower()}_test_rmse"] = float(te_rmse)
+        # Store individual RMSE
+        individual_rmses[f"{name.lower()}_rmse"] = float(te_rmse)
+        
         results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse})
         print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f}")
 
     res_df = pd.DataFrame(results).sort_values('Test RMSE')
     winner_name = res_df.iloc[0]['Model']
-    winner_rmse = float(res_df.iloc[0]['Test RMSE'])
+    winner_rmse = res_df.iloc[0]['Test RMSE']
 
     # 4. ENSEMBLE TRAINING
     ensemble_model = VotingRegressor(best_estimators, weights=[1, 2, 2])
     ensemble_model.fit(X_train_s, y_train)
-    ens_test_rmse = float(root_mean_squared_error(y_test, ensemble_model.predict(X_test_s)))
+    ens_test_rmse = root_mean_squared_error(y_test, ensemble_model.predict(X_test_s))
 
     # 5. MODEL REGISTRY
     model_dir = "karachi_ensemble_model"
@@ -140,21 +144,16 @@ def run_pipeline():
     joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-    # Metrics dictionary ONLY contains numbers to avoid ValueError
-    registry_metrics = {
-        "ensemble_rmse": ens_test_rmse,
-        "winner_rmse": winner_rmse
-    }
-    registry_metrics.update(individual_rmses)
+    # Combine ensemble RMSE and all individual model RMSEs into metrics
+    all_metrics = {"ensemble_rmse": float(ens_test_rmse)}
+    all_metrics.update(individual_rmses)
 
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
-        metrics=registry_metrics,
-        description=f"Tournament Winner: {winner_name}"
+        metrics=all_metrics,
+        description=f"Winner: {winner_name}"
     )
     aqi_model.save(model_dir)
-    # Tags can safely store strings like the winner name
-    aqi_model.add_tag("winner", winner_name)
 
     # 6. FORECAST GENERATION
     print("\n🔮 Generating 3-day Forecast...")
@@ -204,6 +203,7 @@ def run_pipeline():
             fg.insert(data, write_options={"wait_for_job": False})
             print(f"✅ {fg_name} upload initiated.")
         except Exception as e:
+            # If the error is just a disconnected pipe, the upload likely started anyway
             if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
                 print(f"⚠️ Connection dropped while launching {fg_name} job. Data likely reached server.")
             else:

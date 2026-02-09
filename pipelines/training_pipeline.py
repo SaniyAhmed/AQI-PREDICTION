@@ -111,6 +111,7 @@ def run_pipeline():
     }
 
     results, best_estimators = [], []
+    individual_rmses = {} # Track for registry
     for name, (model, params) in model_configs.items():
         grid = GridSearchCV(model, params, cv=3, scoring='neg_root_mean_squared_error', n_jobs=-1).fit(X_train_s, y_train)
         best_m = grid.best_estimator_
@@ -118,6 +119,8 @@ def run_pipeline():
         
         tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
         te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
+        
+        individual_rmses[f"{name.lower()}_rmse"] = float(te_rmse)
         results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse})
         print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f}")
 
@@ -137,10 +140,18 @@ def run_pipeline():
     joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
+    # Combine all individual metrics + ensemble + explicit winner labeling
+    registry_metrics = {
+        "ensemble_test_rmse": float(ens_test_rmse),
+        "tournament_winner_rmse": float(winner_rmse),
+        "winner_label": winner_name
+    }
+    registry_metrics.update(individual_rmses)
+
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
-        metrics={"test_rmse": ens_test_rmse, "winner_rmse": winner_rmse},
-        description=f"Winner: {winner_name}"
+        metrics=registry_metrics,
+        description=f"Unified Ensemble Model. Tournament Winner: {winner_name}"
     )
     aqi_model.save(model_dir)
 
@@ -192,7 +203,6 @@ def run_pipeline():
             fg.insert(data, write_options={"wait_for_job": False})
             print(f"✅ {fg_name} upload initiated.")
         except Exception as e:
-            # If the error is just a disconnected pipe, the upload likely started anyway
             if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
                 print(f"⚠️ Connection dropped while launching {fg_name} job. Data likely reached server.")
             else:

@@ -111,7 +111,6 @@ def run_pipeline():
     }
 
     results, best_estimators = [], []
-    # Dictionary to hold the RMSEs of all individual models
     individual_rmses = {}
 
     for name, (model, params) in model_configs.items():
@@ -122,7 +121,6 @@ def run_pipeline():
         tr_rmse = root_mean_squared_error(y_train, best_m.predict(X_train_s))
         te_rmse = root_mean_squared_error(y_test, best_m.predict(X_test_s))
         
-        # Store individual RMSE
         individual_rmses[f"{name.lower()}_rmse"] = float(te_rmse)
         
         results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse})
@@ -144,8 +142,11 @@ def run_pipeline():
     joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
-    # Combine ensemble RMSE and all individual model RMSEs into metrics
-    all_metrics = {"ensemble_rmse": float(ens_test_rmse)}
+    # Mapping 'ensemble_rmse' to the standard 'rmse' key so Hopsworks UI picks it up
+    all_metrics = {
+        "rmse": float(ens_test_rmse), 
+        "winner_rmse": float(winner_rmse)
+    }
     all_metrics.update(individual_rmses)
 
     aqi_model = mr.python.create_model(
@@ -203,7 +204,6 @@ def run_pipeline():
             fg.insert(data, write_options={"wait_for_job": False})
             print(f"✅ {fg_name} upload initiated.")
         except Exception as e:
-            # If the error is just a disconnected pipe, the upload likely started anyway
             if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
                 print(f"⚠️ Connection dropped while launching {fg_name} job. Data likely reached server.")
             else:

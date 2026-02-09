@@ -65,14 +65,15 @@ def load_all_data():
                 if models:
                     latest_model = models[0]
                     metrics = latest_model.training_metrics
+                    # UPDATED KEYS TO MATCH TRAINING PIPELINE
                     model_info = {
                         "name": latest_model.name,
                         "version": latest_model.version,
-                        "ensemble_rmse": metrics.get("test_rmse", "N/A"),
-                        "rf_rmse": metrics.get("RandomForest_rmse", "N/A"),
-                        "xgb_rmse": metrics.get("XGBoost_rmse", "N/A"),
-                        "svr_rmse": metrics.get("SVR_rmse", "N/A"),
-                        "winner": metrics.get("winner", "N/A"),
+                        "ensemble_rmse": metrics.get("rmse", "N/A"),
+                        "rf_rmse": metrics.get("randomforest_rmse", "N/A"),
+                        "xgb_rmse": metrics.get("xgboost_rmse", "N/A"),
+                        "svr_rmse": metrics.get("svr_rmse", "N/A"),
+                        "winner": metrics.get("winner_rmse", "N/A"), # winner_rmse contains the best value
                         "description": latest_model.description
                     }
             except Exception as e:
@@ -109,11 +110,11 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     with col1:
         if current_aqi:
             st.metric("Current AQI", f"{round(current_aqi, 1)}", 
-                     help="Latest measured AQI value")
+                      help="Latest measured AQI value")
         else:
             # Use first forecast value if current not available
             st.metric("Latest AQI", f"{round(forecast_df.iloc[0]['daily_avg_aqi'], 1)}", 
-                     help="Most recent AQI value")
+                      help="Most recent AQI value")
     
     with col2:
         st.metric("3-Day Average", f"{round(grand_avg, 1)}", 
@@ -122,18 +123,21 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     with col3:
         if model_info and 'ensemble_rmse' in model_info and model_info['ensemble_rmse'] != "N/A":
             st.metric("Model RMSE", f"{round(float(model_info['ensemble_rmse']), 2)}", 
-                     help="Ensemble model prediction error")
+                      help="Ensemble model prediction error")
         else:
             st.metric("Forecast Days", f"{len(forecast_df)}", 
-                     help="Number of forecast days available")
+                      help="Number of forecast days available")
     
     with col4:
-        if model_info and 'winner' in model_info and model_info['winner'] != "N/A":
-            st.metric("Top Model", model_info['winner'], 
-                     help="Best performing individual model (lowest RMSE)")
+        # Extract winner name from description if winner label not explicitly in metrics
+        winner_from_desc = model_info.get('description', '').replace('Winner: ', '') if model_info.get('description') else 'N/A'
+        
+        if winner_from_desc != "N/A":
+            st.metric("Top Model", winner_from_desc, 
+                      help="Best performing individual model (lowest RMSE)")
         else:
             st.metric("Top Model", "Ensemble", 
-                     help="Voting ensemble model")
+                      help="Voting ensemble model")
     
     # Daily Breakdown
     st.subheader("📊 Daily Forecast Breakdown")
@@ -247,7 +251,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         xgb_rmse = float(model_info['xgb_rmse']) if model_info['xgb_rmse'] != "N/A" else None
         svr_rmse = float(model_info['svr_rmse']) if model_info['svr_rmse'] != "N/A" else None
         ensemble_rmse = float(model_info['ensemble_rmse']) if model_info['ensemble_rmse'] != "N/A" else None
-        winner_name = model_info.get('winner', 'N/A')
+        winner_name = model_info.get('description', '').replace('Winner: ', '') if model_info.get('description') else 'N/A'
         
         # Create model comparison table with formatted strings
         model_data = {
@@ -284,8 +288,10 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         
         # Add explanation
         if ensemble_rmse:
-            best_individual = min([r for r in [rf_rmse, xgb_rmse, svr_rmse] if r is not None])
-            st.caption(f"💡 **Ensemble RMSE: {ensemble_rmse:.4f}** | **Best Individual RMSE: {best_individual:.4f}** | Lower RMSE = Better Performance")
+            valid_rmses = [r for r in [rf_rmse, xgb_rmse, svr_rmse] if r is not None]
+            if valid_rmses:
+                best_individual = min(valid_rmses)
+                st.caption(f"💡 **Ensemble RMSE: {ensemble_rmse:.4f}** | **Best Individual RMSE: {best_individual:.4f}** | Lower RMSE = Better Performance")
     else:
         st.info("Model performance metrics will be displayed here once the training pipeline completes and saves metrics to the model registry.")
     
@@ -305,11 +311,12 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     if model_info:
         with st.expander("ℹ️ Model Registry Information"):
             col1, col2 = st.columns(2)
+            winner_val = model_info.get('description', '').replace('Winner: ', '') if model_info.get('description') else 'N/A'
             with col1:
                 st.info(f"""
 **Model Name:** {model_info.get('name', 'N/A')}  
 **Version:** {model_info.get('version', 'N/A')}  
-**Winner:** {model_info.get('winner', 'N/A')}
+**Winner:** {winner_val}
                 """)
             with col2:
                 ensemble_rmse = model_info.get('ensemble_rmse', 'N/A')

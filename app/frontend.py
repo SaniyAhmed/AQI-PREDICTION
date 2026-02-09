@@ -29,7 +29,6 @@ def load_all_data():
             daily_summary_df = pd.read_csv(local_file)
             daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
             daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
-            st.sidebar.success("✅ Data loaded from local cache")
         except Exception as e:
             st.error(f"Error reading local CSV: {e}")
     
@@ -48,7 +47,6 @@ def load_all_data():
                     daily_summary_df = fg_summary.read()
                     daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
                     daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
-                    st.sidebar.success("✅ Data loaded from Hopsworks")
                 except Exception as e:
                     st.warning(f"Could not fetch daily summary: {e}")
             
@@ -127,11 +125,11 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     
     with col4:
         if model_info and 'description' in model_info:
-            winner_name = model_info['description'].replace("Winner: ", "")
+            winner_name = model_info['description'].replace("Winner: ", "").strip()
             st.metric("Top Model", winner_name, 
-                     help="Best performing individual model")
+                     help="Best performing individual model (lowest RMSE)")
         else:
-            st.metric("Model Type", "Ensemble", 
+            st.metric("Top Model", "Ensemble", 
                      help="Voting ensemble model")
     
     # Daily Breakdown
@@ -233,24 +231,40 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     # Model Performance Table
     st.subheader("🤖 Model Performance Comparison")
     
-    if model_info and 'test_rmse' in model_info and 'winner_rmse' in model_info:
-        # Create model comparison table
+    # Check if we have model info from registry
+    has_model_info = model_info and 'test_rmse' in model_info and model_info['test_rmse'] != "N/A"
+    
+    if has_model_info:
+        # Extract metrics
+        ensemble_rmse = round(float(model_info['test_rmse']), 4)
+        winner_rmse = round(float(model_info['winner_rmse']), 4) if model_info.get('winner_rmse', 'N/A') != "N/A" else None
+        winner_name = model_info.get('description', '').replace("Winner: ", "").strip() if 'description' in model_info else None
+        
+        # Create model comparison table with available data
         model_data = {
-            "Model": ["Random Forest", "XGBoost", "SVR", "🏆 Ensemble (Voting)"],
-            "RMSE": ["N/A", "N/A", "N/A", round(float(model_info['test_rmse']), 4) if model_info['test_rmse'] != "N/A" else "N/A"],
-            "Status": ["Component", "Component", "Component", "✅ Active"]
+            "Model": [],
+            "Test RMSE": [],
+            "Status": []
         }
         
-        # Try to extract winner info
-        if 'description' in model_info and "Winner:" in model_info['description']:
-            winner = model_info['description'].replace("Winner: ", "").strip()
-            winner_rmse = round(float(model_info['winner_rmse']), 4) if model_info['winner_rmse'] != "N/A" else "N/A"
-            
-            # Update the winner's RMSE
-            for i, name in enumerate(model_data["Model"]):
-                if winner.lower() in name.lower():
-                    model_data["RMSE"][i] = f"🏆 {winner_rmse}"
-                    model_data["Status"][i] = "🏆 Winner"
+        # Add the winner model
+        if winner_name and winner_rmse:
+            model_data["Model"].append(f"🏆 {winner_name}")
+            model_data["Test RMSE"].append(winner_rmse)
+            model_data["Status"].append("Best Individual")
+        
+        # Add ensemble model
+        model_data["Model"].append("Ensemble (Voting)")
+        model_data["Test RMSE"].append(ensemble_rmse)
+        model_data["Status"].append("✅ Deployed")
+        
+        # Add other component models
+        component_models = ["RandomForest", "XGBoost", "SVR"]
+        for model_name in component_models:
+            if winner_name and model_name.lower() != winner_name.lower():
+                model_data["Model"].append(model_name)
+                model_data["Test RMSE"].append("Component")
+                model_data["Status"].append("In Ensemble")
         
         model_df = pd.DataFrame(model_data)
         
@@ -260,10 +274,13 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             hide_index=True,
             column_config={
                 "Model": st.column_config.TextColumn("Model Name", width="medium"),
-                "RMSE": st.column_config.TextColumn("Test RMSE", width="small"),
-                "Status": st.column_config.TextColumn("Status", width="small")
+                "Test RMSE": st.column_config.TextColumn("Test RMSE", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="medium")
             }
         )
+        
+        # Add explanation
+        st.caption(f"💡 **Ensemble RMSE: {ensemble_rmse}** | **Best Individual RMSE: {winner_rmse if winner_rmse else 'N/A'}** | Lower is better")
     else:
         st.info("Model performance metrics will be displayed here once available from the model registry.")
     

@@ -57,22 +57,26 @@ def load_all_data():
                 if not historical_df.empty:
                     current_aqi = float(historical_df.iloc[-1]['aqi'])
             except Exception as e:
-                st.warning(f"Could not fetch current AQI: {e}")
+                pass  # Silently skip if current AQI not available
             
             # Fetch model info from model registry
             try:
                 models = mr.get_models("karachi_aqi_model")
                 if models:
                     latest_model = models[0]
+                    metrics = latest_model.training_metrics
                     model_info = {
                         "name": latest_model.name,
                         "version": latest_model.version,
-                        "test_rmse": latest_model.training_metrics.get("test_rmse", "N/A"),
-                        "winner_rmse": latest_model.training_metrics.get("winner_rmse", "N/A"),
+                        "ensemble_rmse": metrics.get("test_rmse", "N/A"),
+                        "rf_rmse": metrics.get("RandomForest_rmse", "N/A"),
+                        "xgb_rmse": metrics.get("XGBoost_rmse", "N/A"),
+                        "svr_rmse": metrics.get("SVR_rmse", "N/A"),
+                        "winner": metrics.get("winner", "N/A"),
                         "description": latest_model.description
                     }
             except Exception as e:
-                st.warning(f"Could not fetch model info: {e}")
+                pass  # Silently skip if model info not available
             
             hopsworks.logout()
     except Exception as e:
@@ -116,17 +120,16 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                  help="Average predicted AQI for next 3 days")
     
     with col3:
-        if model_info and 'test_rmse' in model_info and model_info['test_rmse'] != "N/A":
-            st.metric("Model RMSE", f"{round(float(model_info['test_rmse']), 2)}", 
+        if model_info and 'ensemble_rmse' in model_info and model_info['ensemble_rmse'] != "N/A":
+            st.metric("Model RMSE", f"{round(float(model_info['ensemble_rmse']), 2)}", 
                      help="Ensemble model prediction error")
         else:
             st.metric("Forecast Days", f"{len(forecast_df)}", 
                      help="Number of forecast days available")
     
     with col4:
-        if model_info and 'description' in model_info:
-            winner_name = model_info['description'].replace("Winner: ", "").strip()
-            st.metric("Top Model", winner_name, 
+        if model_info and 'winner' in model_info and model_info['winner'] != "N/A":
+            st.metric("Top Model", model_info['winner'], 
                      help="Best performing individual model (lowest RMSE)")
         else:
             st.metric("Top Model", "Ensemble", 
@@ -231,58 +234,64 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     # Model Performance Table
     st.subheader("🤖 Model Performance Comparison")
     
-    # Check if we have model info from registry
-    has_model_info = model_info and 'test_rmse' in model_info and model_info['test_rmse'] != "N/A"
+    # Check if we have complete model info from registry
+    has_model_info = (model_info and 
+                     'rf_rmse' in model_info and 
+                     'xgb_rmse' in model_info and 
+                     'svr_rmse' in model_info and
+                     'ensemble_rmse' in model_info)
     
     if has_model_info:
-        # Extract metrics
-        ensemble_rmse = round(float(model_info['test_rmse']), 4)
-        winner_rmse = round(float(model_info['winner_rmse']), 4) if model_info.get('winner_rmse', 'N/A') != "N/A" else None
-        winner_name = model_info.get('description', '').replace("Winner: ", "").strip() if 'description' in model_info else None
+        # Extract all RMSE values
+        rf_rmse = float(model_info['rf_rmse']) if model_info['rf_rmse'] != "N/A" else None
+        xgb_rmse = float(model_info['xgb_rmse']) if model_info['xgb_rmse'] != "N/A" else None
+        svr_rmse = float(model_info['svr_rmse']) if model_info['svr_rmse'] != "N/A" else None
+        ensemble_rmse = float(model_info['ensemble_rmse']) if model_info['ensemble_rmse'] != "N/A" else None
+        winner_name = model_info.get('winner', 'N/A')
         
-        # Create model comparison table with available data
+        # Create model comparison table
         model_data = {
-            "Model": [],
-            "Test RMSE": [],
-            "Status": []
+            "Model": ["RandomForest", "XGBoost", "SVR", "Ensemble (Voting)"],
+            "Test RMSE": [
+                round(rf_rmse, 4) if rf_rmse else "N/A",
+                round(xgb_rmse, 4) if xgb_rmse else "N/A",
+                round(svr_rmse, 4) if svr_rmse else "N/A",
+                round(ensemble_rmse, 4) if ensemble_rmse else "N/A"
+            ],
+            "Status": ["Individual", "Individual", "Individual", "✅ Deployed"]
         }
         
-        # Add the winner model
-        if winner_name and winner_rmse:
-            model_data["Model"].append(f"🏆 {winner_name}")
-            model_data["Test RMSE"].append(winner_rmse)
-            model_data["Status"].append("Best Individual")
-        
-        # Add ensemble model
-        model_data["Model"].append("Ensemble (Voting)")
-        model_data["Test RMSE"].append(ensemble_rmse)
-        model_data["Status"].append("✅ Deployed")
-        
-        # Add other component models
-        component_models = ["RandomForest", "XGBoost", "SVR"]
-        for model_name in component_models:
-            if winner_name and model_name.lower() != winner_name.lower():
-                model_data["Model"].append(model_name)
-                model_data["Test RMSE"].append("Component")
-                model_data["Status"].append("In Ensemble")
+        # Highlight the winner
+        if winner_name != "N/A":
+            for i, model_name in enumerate(model_data["Model"]):
+                if winner_name.lower() in model_name.lower():
+                    model_data["Model"][i] = f"🏆 {model_name}"
+                    model_data["Status"][i] = "🏆 Best Individual"
         
         model_df = pd.DataFrame(model_data)
         
+        # Style the dataframe
         st.dataframe(
             model_df,
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Model": st.column_config.TextColumn("Model Name", width="medium"),
-                "Test RMSE": st.column_config.TextColumn("Test RMSE", width="small"),
+                "Test RMSE": st.column_config.NumberColumn(
+                    "Test RMSE",
+                    width="small",
+                    format="%.4f"
+                ),
                 "Status": st.column_config.TextColumn("Status", width="medium")
             }
         )
         
         # Add explanation
-        st.caption(f"💡 **Ensemble RMSE: {ensemble_rmse}** | **Best Individual RMSE: {winner_rmse if winner_rmse else 'N/A'}** | Lower is better")
+        if ensemble_rmse:
+            best_individual = min([r for r in [rf_rmse, xgb_rmse, svr_rmse] if r is not None])
+            st.caption(f"💡 **Ensemble RMSE: {round(ensemble_rmse, 4)}** | **Best Individual RMSE: {round(best_individual, 4)}** | Lower RMSE = Better Performance")
     else:
-        st.info("Model performance metrics will be displayed here once available from the model registry.")
+        st.info("Model performance metrics will be displayed here once the training pipeline completes and saves metrics to the model registry.")
     
     # Data Table
     with st.expander("📋 View Detailed Forecast Data"):
@@ -304,13 +313,14 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                 st.info(f"""
 **Model Name:** {model_info.get('name', 'N/A')}  
 **Version:** {model_info.get('version', 'N/A')}  
-**Type:** {model_info.get('description', 'Ensemble Model')}
+**Winner:** {model_info.get('winner', 'N/A')}
                 """)
             with col2:
+                ensemble_rmse = model_info.get('ensemble_rmse', 'N/A')
                 st.info(f"""
-**Ensemble Test RMSE:** {model_info.get('test_rmse', 'N/A')}  
-**Winner Model RMSE:** {model_info.get('winner_rmse', 'N/A')}  
-**Status:** ✅ Active & Deployed
+**Ensemble RMSE:** {round(float(ensemble_rmse), 4) if ensemble_rmse != 'N/A' else 'N/A'}  
+**Status:** ✅ Active & Deployed  
+**Type:** Voting Regressor
                 """)
 
 else:

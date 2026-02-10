@@ -83,14 +83,11 @@ def safe_float(val):
         return None
 
 
+
 def get_winner_from_rmse(model_info: dict):
     """
     Compare the three individual model RMSEs stored in model_info and return
     (winner_name, winner_rmse_float, {name: rmse_float}).
-
-    Priority order:
-      1. Computed from per-model RMSE keys  (set by the fixed training pipeline)
-      2. Fallback: use the stored 'winner' name + 'winner_rmse' scalar value
     """
     candidates = {
         "RandomForest": safe_float(model_info.get("rf_rmse")),
@@ -98,16 +95,31 @@ def get_winner_from_rmse(model_info: dict):
         "SVR":          safe_float(model_info.get("svr_rmse")),
     }
     valid = {k: v for k, v in candidates.items() if v is not None}
+    
+    # 1. Try to find logic based on 'winner_rmse' match
+    winner_rmse_val = safe_float(model_info.get("winner_rmse"))
+    if winner_rmse_val is not None and valid:
+        # Find which model has matching RMSE (with tolerance)
+        for name, rmse in valid.items():
+            if abs(rmse - winner_rmse_val) < 0.0001:
+                return name, winner_rmse_val, {k: round(v, 4) for k, v in valid.items()}
 
+    # 2. Fallback: Computed minimum from available individual RMSEs
     if valid:
         best = min(valid, key=valid.get)
         return best, round(valid[best], 4), {k: round(v, 4) for k, v in valid.items()}
 
-    # Fallback: registry only has 'winner' + 'winner_rmse' (old model version)
-    fallback_name = model_info.get("winner", "N/A")
-    fallback_rmse = safe_float(model_info.get("winner_rmse"))
-    all_rmse = {fallback_name: round(fallback_rmse, 4)} if fallback_rmse else {}
-    return fallback_name, fallback_rmse, all_rmse
+    # 3. Last resort: registry "winner" string
+    fallback_name = model_info.get("winner")
+    if not fallback_name or fallback_name == "N/A":
+        # Try parsing from description if available
+        desc = model_info.get("description", "")
+        if "Winner: " in desc:
+            fallback_name = desc.split("Winner: ")[1].strip()
+        else:
+            fallback_name = "N/A"
+
+    return fallback_name, winner_rmse_val, {}
 
 
 def aqi_category(val):
@@ -174,7 +186,7 @@ def load_all_data():
                         "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
                         "winner_rmse":    m.get("winner_rmse", "N/A"),
                         "winner":         m.get("winner", "N/A"),
-                        # per-model keys saved by the fixed training pipeline
+                        # keys from user screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
                         "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
                         "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
                         "svr_rmse":       m.get("svr_rmse",            "N/A"),
@@ -247,7 +259,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             str(winner_rmse)
             if winner_rmse is not None
             else (
-                str(round(float(model_info["ensemble_rmse"]), 4))
+                str(round(float(model_info.get("ensemble_rmse")), 4))
                 if safe_float(model_info.get("ensemble_rmse")) is not None
                 else "Pending"
             )
@@ -345,7 +357,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 
-    # Build rows as plain Python — no f-string HTML soup
+    # Build rows WITHOUT INDENTATION to avoid Markdown code block soup
     table_rows = []
     for mname, icon, rmse_key, accent in MODELS_META:
         raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
@@ -362,20 +374,19 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             '<span style="color:#4a6a8a;font-size:0.85rem;">—</span>'
         )
 
-        table_rows.append(f"""
-        <tr style="background:{row_bg};border-bottom:1px solid #1e3a5f44;">
-          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
-                     color:{accent};font-weight:600;letter-spacing:0.04em;">
-            {icon}&nbsp; {mname}
-          </td>
-          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
-                     color:#c8dff0;text-align:center;">
-            {rmse_str}
-          </td>
-          <td style="padding:14px 18px;text-align:center;">{status_cell}</td>
-        </tr>""")
+        # IMPORTANT: No triple quotes with indentation here
+        row_html = (
+            f'<tr style="background:{row_bg};border-bottom:1px solid #1e3a5f44;">'
+            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;'
+            f'color:{accent};font-weight:600;letter-spacing:0.04em;">{icon}&nbsp; {mname}</td>'
+            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;'
+            f'color:#c8dff0;text-align:center;">{rmse_str}</td>'
+            f'<td style="padding:14px 18px;text-align:center;">{status_cell}</td>'
+            f'</tr>'
+        )
+        table_rows.append(row_html)
 
-    rows_joined = "\n".join(table_rows)
+    rows_joined = "".join(table_rows)
 
     st.markdown(f"""
 <div style="border-radius:14px;overflow:hidden;border:1px solid #1e3a5f;

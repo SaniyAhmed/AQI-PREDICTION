@@ -36,7 +36,7 @@ def get_forecast_features(trained_columns, latest_actuals):
         pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution/forecast?lat={KARACHI_LAT}&lon={KARACHI_LON}&appid={OWM_API_KEY}"
         pollution_res = session.get(pollution_url, timeout=30).json()
     except Exception as e:
-        print(f"API Fetch Error: {e}")
+        print(f"⚠️ API Fetch Error: {e}")
         return pd.DataFrame(), pd.Series()
     
     df_w = pd.DataFrame(weather_res["hourly"])
@@ -77,7 +77,7 @@ def run_pipeline():
     mr = project.get_model_registry()
     
     # 1. FETCH DATA
-    print("Reading Data from Feature Group: karachi_aqi (v4)...")
+    print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
     fg = fs.get_feature_group(name="karachi_aqi", version=4)
     full_df = fg.read().sort_values(['year', 'month', 'day', 'hour']).dropna()
     
@@ -94,7 +94,7 @@ def run_pipeline():
     X_test_s = scaler.transform(X_test)
 
     # 2. TOURNAMENT
-    print("\nSTARTING REGULARIZED MODEL TOURNAMENT...")
+    print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
             "n_estimators": [500], 
@@ -121,26 +121,14 @@ def run_pipeline():
         results.append({'Model': name, 'Train RMSE': tr_rmse, 'Test RMSE': te_rmse})
         print(f"   {name} -> Train RMSE: {tr_rmse:.4f} | Test RMSE: {te_rmse:.4f}")
 
-    # 3. DETERMINE WINNER + COLLECT INDIVIDUAL RMSEs
     res_df = pd.DataFrame(results).sort_values('Test RMSE')
     winner_name = res_df.iloc[0]['Model']
     winner_rmse = res_df.iloc[0]['Test RMSE']
-
-    # Build a dict of each individual model's Test RMSE for the registry
-    # Keys will be: randomforest_rmse, xgboost_rmse, svr_rmse
-    individual_rmses = {}
-    for _, row in res_df.iterrows():
-        model_key = row['Model'].lower() + "_rmse"
-        individual_rmses[model_key] = float(row['Test RMSE'])
-
-    print(f"\n   Winner: {winner_name} (RMSE: {winner_rmse:.4f})")
-    print(f"   Individual RMSEs: {individual_rmses}")
 
     # 4. ENSEMBLE TRAINING
     ensemble_model = VotingRegressor(best_estimators, weights=[1, 2, 2])
     ensemble_model.fit(X_train_s, y_train)
     ens_test_rmse = root_mean_squared_error(y_test, ensemble_model.predict(X_test_s))
-    print(f"   Ensemble Test RMSE: {ens_test_rmse:.4f}")
 
     # 5. MODEL REGISTRY
     model_dir = "karachi_ensemble_model"
@@ -152,14 +140,13 @@ def run_pipeline():
     # Store ALL metrics in the registry:
     #   rmse              -> ensemble test RMSE
     #   winner_rmse       -> best individual model's test RMSE
-    #   winner            -> name of best individual model
     #   randomforest_rmse -> RandomForest test RMSE
     #   xgboost_rmse      -> XGBoost test RMSE
     #   svr_rmse          -> SVR test RMSE
     registry_metrics = {
         "rmse":        float(ens_test_rmse),
         "winner_rmse": float(winner_rmse),
-        "winner":      winner_name,
+        # "winner" removed because it must be a float
     }
     registry_metrics.update(individual_rmses)
 
@@ -173,7 +160,7 @@ def run_pipeline():
     aqi_model.save(model_dir)
 
     # 6. FORECAST GENERATION
-    print("\nGenerating 3-day Forecast...")
+    print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     if X_f_base.empty: return
     
@@ -208,7 +195,7 @@ def run_pipeline():
     summary_df = pd.DataFrame(summary_data)
 
     # 9. UPLOAD TO HOPSWORKS (With Connection Crash Resilience)
-    print("Uploading Forecasts to Hopsworks...")
+    print("📤 Uploading Forecasts to Hopsworks...")
     
     def resilient_insert(fg_name, data, version=1):
         try:
@@ -218,22 +205,23 @@ def run_pipeline():
                 online_enabled=True
             )
             fg.insert(data, write_options={"wait_for_job": False})
-            print(f"   {fg_name} upload initiated.")
+            print(f"✅ {fg_name} upload initiated.")
         except Exception as e:
+            # If the error is just a disconnected pipe, the upload likely started anyway
             if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
-                print(f"   Connection dropped while launching {fg_name} job. Data likely reached server.")
+                print(f"⚠️ Connection dropped while launching {fg_name} job. Data likely reached server.")
             else:
-                print(f"   Failed to insert into {fg_name}: {e}")
+                print(f"❌ Failed to insert into {fg_name}: {e}")
 
     resilient_insert("karachi_aqi_forecast", forecast_df)
     resilient_insert("karachi_aqi_daily_summary", summary_df, version=2)
     
-    print(f"\n   3-DAY GRAND AVERAGE: {grand_avg}")
+    print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
     
     # 10. CLEANUP
     try:
         hopsworks.logout()
-        print("   Logged out.")
+        print("✅ Logged out.")
     except:
         pass
 

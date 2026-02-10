@@ -179,57 +179,51 @@ def load_all_data():
 
 
             try:
-                # get_models() returns lightweight summaries that may NOT contain
-                # all training_metrics keys.  We must re-fetch each version with
-                # mr.get_model(name, version=V) to obtain the full metrics dict.
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    versions_desc = sorted(
-                        [int(x.version) for x in models], reverse=True
-                    )
+                    latest_version = max(int(x.version) for x in models)
 
-                    chosen = None
-                    chosen_metrics = {}
+                    # ── Try multiple fetch methods to get full training_metrics ──
+                    latest = None
+                    m = {}
 
-                    for ver in versions_desc:
-                        try:
-                            full_model = mr.get_model(
-                                "karachi_aqi_model", version=ver
-                            )
-                            m = full_model.training_metrics or {}
-                            # Check if this version carries the individual model RMSEs
-                            if "randomforest_rmse" in m or "winner_rmse" in m:
-                                chosen = full_model
-                                chosen_metrics = m
-                                break
-                        except Exception:
-                            continue
+                    # Method 1: mr.get_model(name, version)
+                    try:
+                        latest = mr.get_model("karachi_aqi_model", version=latest_version)
+                        m = latest.training_metrics or {}
+                    except Exception:
+                        pass
 
-                    # Fallback: if no version had individual keys, use the latest
-                    if chosen is None:
-                        try:
-                            chosen = mr.get_model(
-                                "karachi_aqi_model", version=versions_desc[0]
-                            )
-                            chosen_metrics = chosen.training_metrics or {}
-                        except Exception:
-                            chosen = models[0]
-                            chosen_metrics = chosen.training_metrics or {}
+                    # Method 2: if Method 1 failed or returned empty metrics,
+                    #           use the summary object from get_models()
+                    if not m or "randomforest_rmse" not in m:
+                        summary = max(models, key=lambda x: int(x.version))
+                        sm = summary.training_metrics or {}
+                        if sm and ("randomforest_rmse" in sm or len(sm) > len(m)):
+                            latest = summary
+                            m = sm
+
+                    # ── DEBUG: show exactly what Hopsworks returned ──
+                    with st.sidebar.expander("DEBUG: Hopsworks metrics", expanded=True):
+                        st.write(f"**Fetched version:** {latest_version}")
+                        st.write(f"**type(training_metrics):** {type(m)}")
+                        st.write(f"**All keys:** {list(m.keys()) if m else 'EMPTY'}")
+                        for k, v in (m.items() if m else []):
+                            st.write(f"  {k} = {v!r} (type: {type(v).__name__})")
 
                     model_info = {
-                        "name":           chosen.name,
-                        "version":        chosen.version,
-                        "ensemble_rmse":  chosen_metrics.get("test_rmse")
-                                          or chosen_metrics.get("rmse", "N/A"),
-                        "winner_rmse":    chosen_metrics.get("winner_rmse", "N/A"),
-                        "winner":         chosen_metrics.get("winner", "N/A"),
-                        "rf_rmse":        chosen_metrics.get("randomforest_rmse", "N/A"),
-                        "xgb_rmse":       chosen_metrics.get("xgboost_rmse",      "N/A"),
-                        "svr_rmse":       chosen_metrics.get("svr_rmse",           "N/A"),
-                        "description":    chosen.description,
+                        "name":           latest.name,
+                        "version":        latest.version,
+                        "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
+                        "winner_rmse":    m.get("winner_rmse", "N/A"),
+                        "winner":         m.get("winner", "N/A"),
+                        "rf_rmse":        m.get("randomforest_rmse", "N/A"),
+                        "xgb_rmse":       m.get("xgboost_rmse",      "N/A"),
+                        "svr_rmse":       m.get("svr_rmse",           "N/A"),
+                        "description":    latest.description,
                     }
-            except Exception:
-                pass
+            except Exception as exc:
+                st.sidebar.error(f"Model fetch error: {exc}")
 
             hopsworks.logout()
     except Exception as e:
@@ -342,7 +336,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Trend Chart ───────────────────────────────────────────────────────────
+    # ── Trend Chart ��──────────────────────────────────────────────────────────
     st.markdown(
         '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
         '📈 3-DAY AQI FORECAST TREND</h2>',

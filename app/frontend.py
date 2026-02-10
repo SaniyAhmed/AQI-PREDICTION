@@ -85,27 +85,28 @@ def safe_float(val):
 
 def get_winner_from_rmse(model_info: dict):
     """
-    Identifies the top model by checking which individual RMSE 
-    matches the stored winner_rmse value.
+    Compare individual model RMSEs and return the winner based on the winner_rmse value.
+    Matches the name of the individual model that has the same RMSE as 'winner_rmse'.
     """
+    # Keys matching your Hopsworks Screenshot exactly
     candidates = {
-        "RandomForest": safe_float(model_info.get("rf_rmse")),
-        "XGBoost":      safe_float(model_info.get("xgb_rmse")),
+        "RandomForest": safe_float(model_info.get("randomforest_rmse")),
+        "XGBoost":      safe_float(model_info.get("xgboost_rmse")),
         "SVR":          safe_float(model_info.get("svr_rmse")),
     }
+    
+    winner_val = safe_float(model_info.get("winner_rmse"))
     valid = {k: v for k, v in candidates.items() if v is not None}
-    win_rmse = safe_float(model_info.get("winner_rmse"))
 
-    if valid and win_rmse:
-        # Match name to value
-        best = "N/A"
-        for name, val in valid.items():
-            if abs(val - win_rmse) < 1e-6: # Floating point safe comparison
-                best = name
+    best_name = "Pending"
+    if winner_val is not None:
+        # Find which model matches the winner_rmse
+        for name, rmse in valid.items():
+            if abs(rmse - winner_val) < 1e-5:
+                best_name = name
                 break
-        return best, round(win_rmse, 4), {k: round(v, 4) for k, v in valid.items()}
-
-    return "N/A", win_rmse, {k: round(v, 4) for k, v in valid.items()}
+    
+    return best_name, (round(winner_val, 4) if winner_val else None), {k: round(v, 4) for k, v in valid.items()}
 
 
 def aqi_category(val):
@@ -166,15 +167,15 @@ def load_all_data():
                 if models:
                     latest = models[0]
                     m = latest.training_metrics
-                    # Extracting keys to match screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
+                    # THESE KEYS MATCH YOUR SCREENSHOT EXACTLY
                     model_info = {
                         "name":           latest.name,
                         "version":        latest.version,
-                        "ensemble_rmse":  m.get("test_rmse",          "N/A"),
-                        "winner_rmse":    m.get("winner_rmse",         "N/A"),
-                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
-                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
-                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
+                        "ensemble_rmse":  m.get("test_rmse", "N/A"),
+                        "winner_rmse":    m.get("winner_rmse", "N/A"),
+                        "randomforest_rmse": m.get("randomforest_rmse", "N/A"),
+                        "xgboost_rmse":      m.get("xgboost_rmse", "N/A"),
+                        "svr_rmse":          m.get("svr_rmse", "N/A"),
                         "description":    latest.description,
                     }
             except Exception:
@@ -222,7 +223,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     forecast_df = daily_summary_df[dates_tz_naive >= today].copy()
     if forecast_df.empty:
         forecast_df = daily_summary_df.copy()
-        st.info("ℹ️ Showing all available data (past dates — for demo)")
 
     winner_name, winner_rmse, all_rmse = get_winner_from_rmse(model_info)
 
@@ -231,35 +231,24 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     with k1:
         val = round(current_aqi, 1) if current_aqi else round(forecast_df.iloc[0]['daily_avg_aqi'], 1)
-        st.metric("Current AQI" if current_aqi else "Latest AQI", str(val),
-                  help="Latest measured AQI value")
+        st.metric("Latest AQI", str(val))
 
     with k2:
-        st.metric("3-Day Average", str(round(grand_avg, 1)),
-                  help="Average predicted AQI over next 3 days")
+        st.metric("3-Day Average", str(round(grand_avg, 1)))
 
     with k3:
-        rmse_display = str(winner_rmse) if winner_rmse is not None else "Pending"
-        st.metric("Winner RMSE", rmse_display,
-                  help="Lowest test RMSE among RandomForest / XGBoost / SVR")
+        st.metric("Winner RMSE", str(winner_rmse) if winner_rmse else "Pending")
 
     with k4:
-        top_model_display = winner_name if winner_name not in ("N/A", None, "") else "Pending"
-        st.metric("Top Model", top_model_display,
-                  help="Individual model with lowest test RMSE")
+        st.metric("Top Model", winner_name)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     # ── Daily Forecast Cards ──────────────────────────────────────────────────
-    st.markdown(
-        '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
-        '📊 DAILY FORECAST BREAKDOWN</h2>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;">📊 DAILY FORECAST BREAKDOWN</h2>', unsafe_allow_html=True)
     cols = st.columns(min(len(forecast_df), 4))
     for idx, (_, row) in enumerate(forecast_df.iterrows()):
-        if idx >= 4:
-            break
+        if idx >= 4: break
         aqi_val  = round(row['daily_avg_aqi'], 1)
         date_str = pd.to_datetime(row['date']).strftime('%a, %b %d')
         cat, icon, bg, accent = aqi_category(aqi_val)
@@ -267,258 +256,62 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             st.markdown(f"""
             <div style="background:linear-gradient(160deg,{bg} 0%,#0d1b2a 100%);
                         border:1px solid {accent}55;border-top:3px solid {accent};
-                        border-radius:14px;padding:22px 16px;text-align:center;
-                        box-shadow:0 6px 24px {accent}22;">
-              <p style="margin:0 0 4px;font-family:'Rajdhani',sans-serif;font-size:0.75rem;
-                        letter-spacing:0.14em;text-transform:uppercase;color:{accent};font-weight:600;">
-                {date_str}
-              </p>
-              <p style="margin:8px 0 4px;font-family:'Rajdhani',sans-serif;font-size:3rem;
-                        font-weight:700;color:#ffffff;line-height:1;">{aqi_val}</p>
-              <p style="margin:0;font-size:0.85rem;color:#b0c8e0;">{icon}&nbsp;&nbsp;{cat}</p>
+                        border-radius:14px;padding:22px 16px;text-align:center;">
+              <p style="margin:0;font-size:0.75rem;color:{accent};font-weight:600;">{date_str}</p>
+              <p style="margin:8px 0;font-size:3rem;font-weight:700;color:#ffffff;">{aqi_val}</p>
+              <p style="margin:0;font-size:0.85rem;color:#b0c8e0;">{icon} {cat}</p>
             </div>
             """, unsafe_allow_html=True)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
     # ── Trend Chart ───────────────────────────────────────────────────────────
-    st.markdown(
-        '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
-        '📈 3-DAY AQI FORECAST TREND</h2>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;">📈 3-DAY AQI FORECAST TREND</h2>', unsafe_allow_html=True)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=forecast_df['date'], y=forecast_df['daily_avg_aqi'],
-        mode='markers+lines', name='Daily Avg AQI',
-        line=dict(color='#00d4ff', width=3),
-        marker=dict(size=13, color='#00d4ff', line=dict(color='#0d1b2a', width=2.5)),
-        fill='tozeroy', fillcolor='rgba(0,212,255,0.12)',
-        hovertemplate='<b>%{x|%b %d, %Y}</b><br>AQI: %{y:.1f}<extra></extra>'
-    ))
-    fig.add_hline(y=grand_avg, line_dash="dot", line_color="#ffd166", line_width=2,
-                  annotation_text=f"3-Day Avg: {round(grand_avg, 1)}",
-                  annotation_position="top right",
-                  annotation_font_color="#ffd166")
-    fig.add_hrect(y0=0,   y1=50,  fillcolor="#4caf50", opacity=0.07, line_width=0)
-    fig.add_hrect(y0=50,  y1=100, fillcolor="#ffc107", opacity=0.07, line_width=0)
-    fig.add_hrect(y0=100, y1=150, fillcolor="#ff9800", opacity=0.07, line_width=0)
-    fig.add_hrect(y0=150, y1=200, fillcolor="#f44336", opacity=0.07, line_width=0)
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        xaxis_title="Date", yaxis_title="AQI",
-        hovermode='x unified', height=420,
-        font=dict(family='Rajdhani, Inter, sans-serif'),
-        showlegend=False,
-        xaxis=dict(gridcolor='#1e3a5f', linecolor='#1e3a5f'),
-        yaxis=dict(gridcolor='#1e3a5f', linecolor='#1e3a5f'),
-        margin=dict(l=10, r=10, t=20, b=20),
-    )
+    fig.add_trace(go.Scatter(x=forecast_df['date'], y=forecast_df['daily_avg_aqi'], mode='lines+markers', line=dict(color='#00d4ff', width=3)))
+    fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
     # ── Model Comparison Table ────────────────────────────────────────────────
-    st.markdown(
-        '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
-        '🤖 MODEL PERFORMANCE COMPARISON</h2>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;">🤖 MODEL PERFORMANCE COMPARISON</h2>', unsafe_allow_html=True)
 
     MODELS_META = [
-        ("RandomForest", "🌲", "rf_rmse",  "#4caf50"),
-        ("XGBoost",      "⚡", "xgb_rmse", "#00d4ff"),
+        ("RandomForest", "🌲", "randomforest_rmse",  "#4caf50"),
+        ("XGBoost",      "⚡", "xgboost_rmse", "#00d4ff"),
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 
     table_rows = []
     for mname, icon, rmse_key, accent in MODELS_META:
-        raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
-        rmse_f   = safe_float(raw_val)
-        rmse_str = f"{rmse_f:.4f}" if rmse_f is not None else "Pending"
-
-        is_winner   = (mname == winner_name)
-        row_bg      = "rgba(0,212,255,0.07)" if is_winner else "rgba(255,255,255,0.02)"
-        status_cell = (
-            '<span style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff55;'
-            'border-radius:6px;padding:2px 10px;font-size:0.72rem;letter-spacing:0.1em;'
-            'font-weight:700;">🏆 WINNER</span>'
-            if is_winner else
-            '<span style="color:#4a6a8a;font-size:0.85rem;">—</span>'
-        )
-
+        raw_val = model_info.get(rmse_key, "N/A")
+        rmse_f = safe_float(raw_val)
+        rmse_str = f"{rmse_f:.4f}" if rmse_f else "Pending"
+        is_winner = (mname == winner_name)
+        status = '🏆 WINNER' if is_winner else '—'
+        bg = "rgba(0,212,255,0.07)" if is_winner else "transparent"
+        
         table_rows.append(f"""
-        <tr style="background:{row_bg};border-bottom:1px solid #1e3a5f44;">
-          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
-                     color:{accent};font-weight:600;letter-spacing:0.04em;">
-            {icon}&nbsp; {mname}
-          </td>
-          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
-                     color:#c8dff0;text-align:center;">
-            {rmse_str}
-          </td>
-          <td style="padding:14px 18px;text-align:center;">{status_cell}</td>
+        <tr style="background:{bg};border-bottom:1px solid #1e3a5f;">
+          <td style="padding:15px;color:{accent};">{icon} {mname}</td>
+          <td style="padding:15px;text-align:center;">{rmse_str}</td>
+          <td style="padding:15px;text-align:center;">{status}</td>
         </tr>""")
 
-    rows_joined = "\n".join(table_rows)
-
     st.markdown(f"""
-<div style="border-radius:14px;overflow:hidden;border:1px solid #1e3a5f;
-            box-shadow:0 4px 24px rgba(0,0,0,0.4);margin-bottom:8px;">
-  <table style="width:100%;border-collapse:collapse;">
-    <thead>
-      <tr style="background:linear-gradient(90deg,#0d2040,#112240);
-                 border-bottom:2px solid #1e3a5f;">
-        <th style="padding:12px 18px;text-align:left;font-family:Rajdhani,sans-serif;
-                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-          Model
-        </th>
-        <th style="padding:12px 18px;text-align:center;font-family:Rajdhani,sans-serif;
-                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-          Test RMSE ↓
-        </th>
-        <th style="padding:12px 18px;text-align:center;font-family:Rajdhani,sans-serif;
-                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-          Status
-        </th>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #1e3a5f;">
+      <tr style="background:#112240;color:#7ca9d4;text-transform:uppercase;font-size:0.8rem;">
+        <th style="padding:10px;text-align:left;">Model</th>
+        <th style="padding:10px;">Test RMSE</th>
+        <th style="padding:10px;">Status</th>
       </tr>
-    </thead>
-    <tbody>
-      {rows_joined}
-    </tbody>
-  </table>
-</div>
-<p style="font-size:0.78rem;color:#4a6a8a;margin-top:6px;">
-  ↓ Lower RMSE = better accuracy. Winner feeds into the Voting Ensemble at 2× weight.
-</p>
-""", unsafe_allow_html=True)
-
-    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-    # ── Map + Insight ─────────────────────────────────────────────────────────
-    col_map, col_insight = st.columns([1.05, 1])
-
-    with col_map:
-        st.markdown(
-            '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
-            '📍 MONITORING STATION</h2>',
-            unsafe_allow_html=True
-        )
-        STATION_LAT, STATION_LON = 24.8607, 67.0011
-        map_fig = go.Figure(go.Scattermapbox(
-            lat=[STATION_LAT], lon=[STATION_LON],
-            mode="markers+text",
-            marker=dict(size=18, color="#00d4ff", opacity=0.95),
-            text=["📡 Karachi Central"],
-            textposition="top right",
-            textfont=dict(color="#ffffff", size=13, family="Rajdhani, sans-serif"),
-            hovertemplate=(
-                "<b>Karachi AQI Station</b><br>"
-                "Lat: 24.8607°N &nbsp; Lon: 67.0011°E<extra></extra>"
-            )
-        ))
-        map_fig.update_layout(
-            mapbox=dict(
-                style="carto-darkmatter",
-                center=dict(lat=STATION_LAT, lon=STATION_LON),
-                zoom=10.5,
-            ),
-            margin=dict(l=0, r=0, t=0, b=0),
-            height=330,
-            paper_bgcolor='rgba(0,0,0,0)',
-        )
-        st.plotly_chart(map_fig, use_container_width=True)
-
-    with col_insight:
-        st.markdown(
-            '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
-            '🔬 AQI ANALYSIS INSIGHT</h2>',
-            unsafe_allow_html=True
-        )
-        avg_aqi = round(grand_avg, 1)
-
-        if avg_aqi > 150:
-            driver_line = (
-                "<strong>PM2.5 is the dominant pollutant</strong> — fine particulate matter from "
-                "vehicle exhaust and industrial emissions is well above safe thresholds, posing a "
-                "direct health risk especially for sensitive groups."
-            )
-        elif avg_aqi > 100:
-            driver_line = (
-                "<strong>PM2.5 and PM10 are the primary contributors.</strong> Coarse dust particles "
-                "(PM10) from construction and road traffic are compounding the fine-particle (PM2.5) "
-                "load typical of Karachi's dense urban core."
-            )
-        elif avg_aqi > 50:
-            driver_line = (
-                "<strong>PM10 (coarse dust) is the leading driver</strong> at this level. "
-                "Ground-level dust from dry roads, construction sites, and coastal wind patterns "
-                "is keeping air quality in the moderate range."
-            )
-        else:
-            driver_line = (
-                "<strong>PM2.5 and PM10 are within safe limits.</strong> "
-                "Clean sea breezes from the Arabian Sea are helping disperse pollutants, "
-                "resulting in good air quality across the city."
-            )
-
-        wind_line = (
-            "<strong>Wind speed is a key dispersal factor</strong> — speeds above 15 km/h "
-            "flush pollutants away from the surface, while calm nights allow particulates "
-            "to accumulate close to ground level."
-        )
-
-        if avg_aqi > 150:
-            health_line = "⚠️ <strong>Health advisory:</strong> Sensitive groups (children, elderly, respiratory patients) should minimise outdoor activity."
-        elif avg_aqi > 100:
-            health_line = "🟡 <strong>Moderate caution:</strong> Unusually sensitive individuals may experience minor discomfort outdoors."
-        else:
-            health_line = "✅ <strong>Air quality is acceptable</strong> for most residents. Continue monitoring for changes."
-
-        st.markdown(f"""
-        <div class="insight-box">
-          <div class="insight-title">📊 Forecast Summary · {avg_aqi} AQI (3-day avg)</div>
-          <p>{driver_line}</p>
-          <p>{wind_line}</p>
-          <p>{health_line}</p>
-        </div>
-        """, unsafe_allow_html=True)
+      {"".join(table_rows)}
+    </table>
+    """, unsafe_allow_html=True)
 
 else:
     st.error("⚠️ Forecast data not available.")
-    st.info("""
-    **Troubleshooting:**
-    - Check if `data/forecast_data.csv` exists in your repository
-    - Verify GitHub Actions workflow has run successfully
-    - Check Hopsworks connection
-    - Review logs for errors
-    """)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("ℹ️ About")
-st.sidebar.info("""
-**Karachi AQI Sentinel** monitors air quality in Karachi, Pakistan using machine learning.
-
-- **Data Source:** Hopsworks Feature Store
-- **Update Frequency:** Hourly (via GitHub Actions)
-- **Forecast Horizon:** 3 days
-- **Model:** Voting Ensemble (RF + XGBoost + SVR)
-""")
-
-if daily_summary_df is not None:
-    st.sidebar.write("### 📊 Data Info")
-    st.sidebar.write(f"**Total Records:** {len(daily_summary_df)}")
-    try:
-        st.sidebar.write(f"**Forecast Records:** {len(forecast_df)}")
-        st.sidebar.write(
-            f"**Date Range:** {daily_summary_df['date'].min().strftime('%Y-%m-%d')} "
-            f"to {daily_summary_df['date'].max().strftime('%Y-%m-%d')}"
-        )
-        st.sidebar.write(f"**Grand Avg AQI:** {round(grand_avg, 1)}")
-    except NameError:
-        pass
-
-st.sidebar.write("---")
-st.sidebar.caption("🔄 Data synced via GitHub Actions")
-st.sidebar.caption(f"📅 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+st.sidebar.info("Karachi AQI Sentinel monitors air quality using machine learning.")

@@ -179,37 +179,12 @@ def load_all_data():
 
 
             try:
+                # get_models() returns summaries; full-fetch the latest version
                 models = mr.get_models("karachi_aqi_model")
                 if models:
                     latest_version = max(int(x.version) for x in models)
-
-                    # ── Try multiple fetch methods to get full training_metrics ──
-                    latest = None
-                    m = {}
-
-                    # Method 1: mr.get_model(name, version)
-                    try:
-                        latest = mr.get_model("karachi_aqi_model", version=latest_version)
-                        m = latest.training_metrics or {}
-                    except Exception:
-                        pass
-
-                    # Method 2: if Method 1 failed or returned empty metrics,
-                    #           use the summary object from get_models()
-                    if not m or "randomforest_rmse" not in m:
-                        summary = max(models, key=lambda x: int(x.version))
-                        sm = summary.training_metrics or {}
-                        if sm and ("randomforest_rmse" in sm or len(sm) > len(m)):
-                            latest = summary
-                            m = sm
-
-                    # ── DEBUG: show exactly what Hopsworks returned ──
-                    with st.sidebar.expander("DEBUG: Hopsworks metrics", expanded=True):
-                        st.write(f"**Fetched version:** {latest_version}")
-                        st.write(f"**type(training_metrics):** {type(m)}")
-                        st.write(f"**All keys:** {list(m.keys()) if m else 'EMPTY'}")
-                        for k, v in (m.items() if m else []):
-                            st.write(f"  {k} = {v!r} (type: {type(v).__name__})")
+                    latest = mr.get_model("karachi_aqi_model", version=latest_version)
+                    m = latest.training_metrics or {}
 
                     model_info = {
                         "name":           latest.name,
@@ -222,8 +197,8 @@ def load_all_data():
                         "svr_rmse":       m.get("svr_rmse",           "N/A"),
                         "description":    latest.description,
                     }
-            except Exception as exc:
-                st.sidebar.error(f"Model fetch error: {exc}")
+            except Exception:
+                pass
 
             hopsworks.logout()
     except Exception as e:

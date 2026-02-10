@@ -5,7 +5,6 @@ import plotly.graph_objects as go
 import os
 import warnings
 
-# Suppress warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='hopsworks')
 os.environ["HSFS_DISABLE_FLIGHT_CLIENT"] = "True"
 os.environ["HSFS_DISABLE_HIVE_CLIENT"] = "True"
@@ -15,13 +14,14 @@ import hopsworks
 st.set_page_config(page_title="Karachi AQI Sentinel", layout="wide", page_icon="🌬️")
 
 # --- DATA FETCHING ---
-@st.cache_data(ttl=3600)
+# FIX: Reduced TTL from 3600s → 300s (5 min) so fresh CSV is picked up quickly after each sync.
+# The GitHub Actions job runs every hour; a 1-hour cache meant you could wait up to 2 hours for new data.
+@st.cache_data(ttl=300)
 def load_all_data():
     daily_summary_df = None
     current_aqi = None
     model_info = {}
     
-    # Option 1: Read from local CSV (updated by GitHub Actions)
     local_file = "data/forecast_data.csv"
     
     if os.path.exists(local_file):
@@ -32,7 +32,6 @@ def load_all_data():
         except Exception as e:
             st.error(f"Error reading local CSV: {e}")
     
-    # Option 2: Fetch directly from Hopsworks (fallback or for model info)
     try:
         api_key = st.secrets.get("MY_HOPSWORK_KEY") or os.getenv("MY_HOPSWORK_KEY")
         if api_key:
@@ -40,7 +39,6 @@ def load_all_data():
             fs = project.get_feature_store()
             mr = project.get_model_registry()
             
-            # Fetch daily summary if local file doesn't exist
             if daily_summary_df is None or daily_summary_df.empty:
                 try:
                     fg_summary = fs.get_feature_group(name="karachi_aqi_daily_summary", version=2)
@@ -50,16 +48,14 @@ def load_all_data():
                 except Exception as e:
                     st.warning(f"Could not fetch daily summary: {e}")
             
-            # Fetch current AQI from historical data
             try:
                 fg_historical = fs.get_feature_group(name="karachi_aqi", version=4)
                 historical_df = fg_historical.read().sort_values(['year', 'month', 'day', 'hour'])
                 if not historical_df.empty:
                     current_aqi = float(historical_df.iloc[-1]['aqi'])
-            except Exception as e:
-                pass  # Silently skip if current AQI not available
+            except Exception:
+                pass
             
-            # Fetch model info from model registry
             try:
                 models = mr.get_models("karachi_aqi_model")
                 if models:
@@ -75,8 +71,8 @@ def load_all_data():
                         "winner": metrics.get("winner", "N/A"),
                         "description": latest_model.description
                     }
-            except Exception as e:
-                pass  # Silently skip if model info not available
+            except Exception:
+                pass
             
             hopsworks.logout()
     except Exception as e:
@@ -91,14 +87,15 @@ st.title("🌬️ Karachi AQI Sentinel")
 st.markdown("### Real-time Air Quality Monitoring & 3-Day Forecast")
 
 if daily_summary_df is not None and not daily_summary_df.empty:
-    # Extract the correct grand average from the latest row
     grand_avg = daily_summary_df['grand_avg_aqi'].iloc[-1] if 'grand_avg_aqi' in daily_summary_df.columns else daily_summary_df['daily_avg_aqi'].mean()
     
-    # Filter only future dates (forecast)
-    today = pd.Timestamp.now().normalize()
-    forecast_df = daily_summary_df[daily_summary_df['date'] >= today].copy()
+    # FIX: Use UTC-aware "today" and strip timezone from the date column before comparing.
+    # Previously, a timezone mismatch between pd.Timestamp.now() (local) and dates stored as UTC
+    # caused today's fresh forecast row to be silently dropped, making the dashboard look stale.
+    today = pd.Timestamp.utcnow().normalize().tz_localize(None)
+    dates_tz_naive = daily_summary_df['date'].dt.tz_localize(None) if daily_summary_df['date'].dt.tz is not None else daily_summary_df['date']
+    forecast_df = daily_summary_df[dates_tz_naive >= today].copy()
     
-    # If no future dates, show all data (for testing/demo)
     if forecast_df.empty:
         forecast_df = daily_summary_df.copy()
         st.info("ℹ️ Showing all available forecast data (including past dates for demo)")
@@ -111,7 +108,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             st.metric("Current AQI", f"{round(current_aqi, 1)}", 
                      help="Latest measured AQI value")
         else:
-            # Use first forecast value if current not available
             st.metric("Latest AQI", f"{round(forecast_df.iloc[0]['daily_avg_aqi'], 1)}", 
                      help="Most recent AQI value")
     
@@ -144,16 +140,14 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     # Daily Breakdown
     st.subheader("📊 Daily Forecast Breakdown")
     
-    # Create cards for each forecast day
-    cols = st.columns(min(len(forecast_df), 4))  # Max 4 columns
+    cols = st.columns(min(len(forecast_df), 4))
     for idx, (_, row) in enumerate(forecast_df.iterrows()):
-        if idx >= 4:  # Limit to 4 cards
+        if idx >= 4:
             break
         with cols[idx]:
             date_str = pd.to_datetime(row['date']).strftime('%b %d')
             aqi_val = round(row['daily_avg_aqi'], 1)
             
-            # AQI category
             if aqi_val <= 50:
                 category = "Good"
                 color = "🟢"
@@ -190,7 +184,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     
     fig = go.Figure()
     
-    # Main forecast line
     fig.add_trace(go.Scatter(
         x=forecast_df['date'],
         y=forecast_df['daily_avg_aqi'],
@@ -203,7 +196,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         hovertemplate='<b>%{x|%b %d, %Y}</b><br>AQI: %{y:.1f}<extra></extra>'
     ))
     
-    # Add grand average line
     fig.add_hline(
         y=grand_avg, 
         line_dash="dash", 
@@ -213,7 +205,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         annotation_position="right"
     )
     
-    # Add AQI category zones
     fig.add_hrect(y0=0, y1=50, fillcolor="green", opacity=0.1, line_width=0, annotation_text="Good", annotation_position="left")
     fig.add_hrect(y0=50, y1=100, fillcolor="yellow", opacity=0.1, line_width=0, annotation_text="Moderate", annotation_position="left")
     fig.add_hrect(y0=100, y1=150, fillcolor="orange", opacity=0.1, line_width=0, annotation_text="Unhealthy SG", annotation_position="left")
@@ -226,13 +217,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         hovermode='x unified',
         height=500,
         showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        )
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -240,38 +225,27 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     # Model Performance Table
     st.subheader("🤖 Model Performance Comparison")
     
-    # Check if we have model info from registry
     has_model_info = model_info and 'winner' in model_info
     
     if has_model_info:
         winner_name = model_info.get('winner', 'N/A')
+        model_data = {"Model": ["RandomForest", "XGBoost", "SVR", "Ensemble (Voting)"]}
         
-        # Create simplified model list
-        model_data = {
-            "Model": ["RandomForest", "XGBoost", "SVR", "Ensemble (Voting)"]
-        }
-        
-        # Highlight the winner
         if winner_name != "N/A":
             for i, model_name in enumerate(model_data["Model"]):
                 if winner_name.lower() in model_name.lower():
                     model_data["Model"][i] = f"🏆 {model_name} (Winner)"
         
         model_df = pd.DataFrame(model_data)
-        
-        # Display as simple table
         st.dataframe(
             model_df,
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Model": st.column_config.TextColumn("Trained Models", width="large")
-            }
+            column_config={"Model": st.column_config.TextColumn("Trained Models", width="large")}
         )
     else:
         st.info("Model information will be displayed here once the training pipeline completes.")
     
-    # Data Table
     with st.expander("📋 View Detailed Forecast Data"):
         display_df = forecast_df.copy()
         display_df['date'] = pd.to_datetime(display_df['date']).dt.strftime('%Y-%m-%d')
@@ -283,7 +257,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         })
         st.dataframe(display_df, use_container_width=True, hide_index=True)
     
-    # Model Information Details
     if model_info:
         with st.expander("ℹ️ Model Registry Information"):
             col1, col2 = st.columns(2)

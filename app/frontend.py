@@ -136,6 +136,8 @@ def aqi_category(val):
 
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
+
+# ── Data Fetching ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_all_data():
     daily_summary_df = None
@@ -176,9 +178,10 @@ def load_all_data():
                 pass
 
             try:
+                # Fetch ALL models and sort by version (highest first) to get the LATEST
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    latest = models[0]
+                    latest = max(models, key=lambda x: x.version)
                     m = latest.training_metrics
                     model_info = {
                         "name":           latest.name,
@@ -357,14 +360,22 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 
-    # Build rows WITHOUT INDENTATION to avoid Markdown code block soup
+    # Build rows as plain Python — no f-string HTML soup
     table_rows = []
     for mname, icon, rmse_key, accent in MODELS_META:
         raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
         rmse_f   = safe_float(raw_val)
         rmse_str = f"{rmse_f:.4f}" if rmse_f is not None else "Pending"
 
-        is_winner   = (mname == winner_name)
+        is_winner = False
+        if winner_rmse is not None and rmse_f is not None:
+             if abs(rmse_f - winner_rmse) < 0.0001:
+                 is_winner = True
+        
+        # If winner_name is explicitly set and matches (fallback)
+        if not is_winner and winner_name == mname:
+             is_winner = True
+
         row_bg      = "rgba(0,212,255,0.07)" if is_winner else "rgba(255,255,255,0.02)"
         status_cell = (
             '<span style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff55;'
@@ -374,13 +385,10 @@ if daily_summary_df is not None and not daily_summary_df.empty:
             '<span style="color:#4a6a8a;font-size:0.85rem;">—</span>'
         )
 
-        # IMPORTANT: No triple quotes with indentation here
         row_html = (
             f'<tr style="background:{row_bg};border-bottom:1px solid #1e3a5f44;">'
-            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;'
-            f'color:{accent};font-weight:600;letter-spacing:0.04em;">{icon}&nbsp; {mname}</td>'
-            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;'
-            f'color:#c8dff0;text-align:center;">{rmse_str}</td>'
+            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;color:{accent};font-weight:600;letter-spacing:0.04em;">{icon}&nbsp; {mname}</td>'
+            f'<td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;color:#c8dff0;text-align:center;">{rmse_str}</td>'
             f'<td style="padding:14px 18px;text-align:center;">{status_cell}</td>'
             f'</tr>'
         )
@@ -410,7 +418,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
       </tr>
     </thead>
     <tbody>
-      {rows_joined}
+      {{rows_joined}}
     </tbody>
   </table>
 </div>

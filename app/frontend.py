@@ -90,8 +90,8 @@ def get_winner_from_rmse(model_info: dict):
     (winner_name, winner_rmse_float, {name: rmse_float}).
     """
     candidates = {
-        "RandomForest": safe_float(model_info.get("randomforest_rmse")),
-        "XGBoost":      safe_float(model_info.get("xgboost_rmse")),
+        "RandomForest": safe_float(model_info.get("rf_rmse")),
+        "XGBoost":      safe_float(model_info.get("xgb_rmse")),
         "SVR":          safe_float(model_info.get("svr_rmse")),
     }
     valid = {k: v for k, v in candidates.items() if v is not None}
@@ -179,42 +179,54 @@ def load_all_data():
 
 
             try:
-                # Fetch ALL models and sort by version (highest first) to get the LATEST
+                # get_models() returns lightweight summaries that may NOT contain
+                # all training_metrics keys.  We must re-fetch each version with
+                # mr.get_model(name, version=V) to obtain the full metrics dict.
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    # Sort version descending (handle potential string versions safely)
-                    models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
-                    
-                    # get_models() returns summary objects with PARTIAL training_metrics.
-                    # We must call mr.get_model(name, version=V) to get FULL metrics.
-                    target_version = models_sorted[0].version  # default: latest
+                    versions_desc = sorted(
+                        [int(x.version) for x in models], reverse=True
+                    )
 
-                    # Try to find the first version that has the new individual metrics
-                    for model in models_sorted:
+                    chosen = None
+                    chosen_metrics = {}
+
+                    for ver in versions_desc:
                         try:
-                            full = mr.get_model("karachi_aqi_model", version=int(model.version))
-                            fm = full.training_metrics
-                            if fm and ("winner_rmse" in fm or "randomforest_rmse" in fm):
-                                target_version = model.version
+                            full_model = mr.get_model(
+                                "karachi_aqi_model", version=ver
+                            )
+                            m = full_model.training_metrics or {}
+                            # Check if this version carries the individual model RMSEs
+                            if "randomforest_rmse" in m or "winner_rmse" in m:
+                                chosen = full_model
+                                chosen_metrics = m
                                 break
                         except Exception:
                             continue
 
-                    # Full-fetch the chosen version to guarantee all training_metrics
-                    latest = mr.get_model("karachi_aqi_model", version=int(target_version))
-                    m = latest.training_metrics if latest.training_metrics else {}
-                    
+                    # Fallback: if no version had individual keys, use the latest
+                    if chosen is None:
+                        try:
+                            chosen = mr.get_model(
+                                "karachi_aqi_model", version=versions_desc[0]
+                            )
+                            chosen_metrics = chosen.training_metrics or {}
+                        except Exception:
+                            chosen = models[0]
+                            chosen_metrics = chosen.training_metrics or {}
+
                     model_info = {
-                        "name":           latest.name,
-                        "version":        latest.version,
-                        "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
-                        "winner_rmse":    m.get("winner_rmse", "N/A"),
-                        "winner":         m.get("winner", "N/A"),
-                        # keys from Hopsworks screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
-                        "randomforest_rmse":        m.get("randomforest_rmse",   "N/A"),
-                        "xgboost_rmse":       m.get("xgboost_rmse",        "N/A"),
-                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
-                        "description":    latest.description,
+                        "name":           chosen.name,
+                        "version":        chosen.version,
+                        "ensemble_rmse":  chosen_metrics.get("test_rmse")
+                                          or chosen_metrics.get("rmse", "N/A"),
+                        "winner_rmse":    chosen_metrics.get("winner_rmse", "N/A"),
+                        "winner":         chosen_metrics.get("winner", "N/A"),
+                        "rf_rmse":        chosen_metrics.get("randomforest_rmse", "N/A"),
+                        "xgb_rmse":       chosen_metrics.get("xgboost_rmse",      "N/A"),
+                        "svr_rmse":       chosen_metrics.get("svr_rmse",           "N/A"),
+                        "description":    chosen.description,
                     }
             except Exception:
                 pass
@@ -278,13 +290,10 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                   help="Average predicted AQI over next 3 days")
 
     with k3:
-        # Priority: 1) winner_rmse directly from Hopsworks registry
-        #           2) winner_rmse computed by get_winner_from_rmse
-        #           3) ensemble_rmse fallback
-        #           4) "Pending"
-        registry_winner_rmse = safe_float(model_info.get("winner_rmse"))
-        if registry_winner_rmse is not None:
-            rmse_display = str(round(registry_winner_rmse, 4))
+        # Priority: registry winner_rmse -> computed winner_rmse -> ensemble -> Pending
+        registry_wr = safe_float(model_info.get("winner_rmse"))
+        if registry_wr is not None:
+            rmse_display = str(round(registry_wr, 4))
         elif winner_rmse is not None:
             rmse_display = str(round(winner_rmse, 4)) if isinstance(winner_rmse, float) else str(winner_rmse)
         elif safe_float(model_info.get("ensemble_rmse")) is not None:
@@ -380,8 +389,8 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     )
 
     MODELS_META = [
-        ("RandomForest", "🌲", "randomforest_rmse",  "#4caf50"),
-        ("XGBoost",      "⚡", "xgboost_rmse", "#00d4ff"),
+        ("RandomForest", "🌲", "rf_rmse",  "#4caf50"),
+        ("XGBoost",      "⚡", "xgb_rmse", "#00d4ff"),
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 

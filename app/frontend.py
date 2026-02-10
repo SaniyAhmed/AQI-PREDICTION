@@ -88,25 +88,16 @@ def get_winner_from_rmse(model_info: dict):
     """
     Compare the three individual model RMSEs stored in model_info and return
     (winner_name, winner_rmse_float, {name: rmse_float}).
-    Uses both mapped keys and raw Hopsworks metric keys as fallback.
     """
-    # Try mapped keys first, then fall back to raw metrics from Hopsworks
-    raw = model_info.get("_raw_metrics", {})
-
-    rf_val  = safe_float(model_info.get("rf_rmse"))  or safe_float(raw.get("randomforest_rmse"))
-    xgb_val = safe_float(model_info.get("xgb_rmse")) or safe_float(raw.get("xgboost_rmse"))
-    svr_val = safe_float(model_info.get("svr_rmse")) or safe_float(raw.get("svr_rmse"))
-
     candidates = {
-        "RandomForest": rf_val,
-        "XGBoost":      xgb_val,
-        "SVR":          svr_val,
+        "RandomForest": safe_float(model_info.get("rf_rmse")),
+        "XGBoost":      safe_float(model_info.get("xgb_rmse")),
+        "SVR":          safe_float(model_info.get("svr_rmse")),
     }
     valid = {k: v for k, v in candidates.items() if v is not None}
-
-    # 1. Get the definitive winner_rmse directly from registry
-    winner_rmse_val = safe_float(model_info.get("winner_rmse")) or safe_float(raw.get("winner_rmse"))
-
+    
+    # 1. Try to find logic based on 'winner_rmse' match
+    winner_rmse_val = safe_float(model_info.get("winner_rmse"))
     if winner_rmse_val is not None and valid:
         # Find which model has matching RMSE (with tolerance)
         for name, rmse in valid.items():
@@ -194,29 +185,36 @@ def load_all_data():
                     # Sort version descending (handle potential string versions safely)
                     models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
                     
-                    latest = models_sorted[0]
-                    # Try to find the first model that actually has the new metrics
+                    # get_models() returns summary objects with PARTIAL training_metrics.
+                    # We must call mr.get_model(name, version=V) to get FULL metrics.
+                    target_version = models_sorted[0].version  # default: latest
+
+                    # Try to find the first version that has the new individual metrics
                     for model in models_sorted:
-                        # Check for one of the new keys from the latest pipeline
-                        if "winner_rmse" in model.training_metrics or "randomforest_rmse" in model.training_metrics:
-                            latest = model
-                            break
+                        try:
+                            full = mr.get_model("karachi_aqi_model", version=int(model.version))
+                            fm = full.training_metrics
+                            if fm and ("winner_rmse" in fm or "randomforest_rmse" in fm):
+                                target_version = model.version
+                                break
+                        except Exception:
+                            continue
+
+                    # Full-fetch the chosen version to guarantee all training_metrics
+                    latest = mr.get_model("karachi_aqi_model", version=int(target_version))
+                    m = latest.training_metrics if latest.training_metrics else {}
                     
-                    m = latest.training_metrics
-                    # Store raw metrics dict for direct fallback access
-                    raw_metrics = dict(m) if m else {}
                     model_info = {
                         "name":           latest.name,
                         "version":        latest.version,
-                        "ensemble_rmse":  raw_metrics.get("test_rmse", raw_metrics.get("rmse", "N/A")),
-                        "winner_rmse":    raw_metrics.get("winner_rmse", "N/A"),
-                        "winner":         raw_metrics.get("winner", "N/A"),
+                        "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
+                        "winner_rmse":    m.get("winner_rmse", "N/A"),
+                        "winner":         m.get("winner", "N/A"),
                         # keys from Hopsworks screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
-                        "rf_rmse":        raw_metrics.get("randomforest_rmse",   "N/A"),
-                        "xgb_rmse":       raw_metrics.get("xgboost_rmse",        "N/A"),
-                        "svr_rmse":       raw_metrics.get("svr_rmse",            "N/A"),
+                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
+                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
+                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
                         "description":    latest.description,
-                        "_raw_metrics":   raw_metrics,
                     }
             except Exception:
                 pass
@@ -280,15 +278,17 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                   help="Average predicted AQI over next 3 days")
 
     with k3:
-        # Use winner_rmse directly from Hopsworks registry first
-        raw_metrics = model_info.get("_raw_metrics", {})
-        registry_winner_rmse = safe_float(model_info.get("winner_rmse")) or safe_float(raw_metrics.get("winner_rmse"))
+        # Priority: 1) winner_rmse directly from Hopsworks registry
+        #           2) winner_rmse computed by get_winner_from_rmse
+        #           3) ensemble_rmse fallback
+        #           4) "Pending"
+        registry_winner_rmse = safe_float(model_info.get("winner_rmse"))
         if registry_winner_rmse is not None:
-            rmse_display = f"{registry_winner_rmse:.4f}"
+            rmse_display = str(round(registry_winner_rmse, 4))
         elif winner_rmse is not None:
-            rmse_display = f"{winner_rmse:.4f}" if isinstance(winner_rmse, float) else str(winner_rmse)
+            rmse_display = str(round(winner_rmse, 4)) if isinstance(winner_rmse, float) else str(winner_rmse)
         elif safe_float(model_info.get("ensemble_rmse")) is not None:
-            rmse_display = f"{safe_float(model_info.get('ensemble_rmse')):.4f}"
+            rmse_display = str(round(float(model_info.get("ensemble_rmse")), 4))
         else:
             rmse_display = "Pending"
         st.metric("Winner RMSE", rmse_display,
@@ -379,26 +379,21 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         unsafe_allow_html=True
     )
 
-    # Map: (display_name, icon, model_info_key, raw_hopsworks_key, accent_color)
     MODELS_META = [
-        ("RandomForest", "🌲", "rf_rmse",  "randomforest_rmse", "#4caf50"),
-        ("XGBoost",      "⚡", "xgb_rmse", "xgboost_rmse",      "#00d4ff"),
-        ("SVR",          "📐", "svr_rmse",  "svr_rmse",          "#ff9800"),
+        ("RandomForest", "🌲", "rf_rmse",  "#4caf50"),
+        ("XGBoost",      "⚡", "xgb_rmse", "#00d4ff"),
+        ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 
     # Build rows as plain Python — no f-string HTML soup
     table_rows = []
-    raw_metrics = model_info.get("_raw_metrics", {})
     
     # 1. First ensure we have the definitive winner RMSE from registry
-    definitive_winner_rmse = safe_float(model_info.get("winner_rmse")) or safe_float(raw_metrics.get("winner_rmse"))
+    definitive_winner_rmse = safe_float(model_info.get("winner_rmse"))
     
-    for mname, icon, rmse_key, hw_key, accent in MODELS_META:
-        # Try mapped key first, then fall back to raw Hopsworks metric key
+    for mname, icon, rmse_key, accent in MODELS_META:
         raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
         rmse_f   = safe_float(raw_val)
-        if rmse_f is None:
-            rmse_f = safe_float(raw_metrics.get(hw_key))
         rmse_str = f"{rmse_f:.4f}" if rmse_f is not None else "Pending"
 
         is_winner = False

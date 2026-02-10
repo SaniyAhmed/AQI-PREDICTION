@@ -85,12 +85,8 @@ def safe_float(val):
 
 def get_winner_from_rmse(model_info: dict):
     """
-    Compare the three individual model RMSEs stored in model_info and return
-    (winner_name, winner_rmse_float, {name: rmse_float}).
-
-    Priority order:
-      1. Computed from per-model RMSE keys  (set by the fixed training pipeline)
-      2. Fallback: use the stored 'winner' name + 'winner_rmse' scalar value
+    Identifies the top model by checking which individual RMSE 
+    matches the stored winner_rmse value.
     """
     candidates = {
         "RandomForest": safe_float(model_info.get("rf_rmse")),
@@ -98,16 +94,18 @@ def get_winner_from_rmse(model_info: dict):
         "SVR":          safe_float(model_info.get("svr_rmse")),
     }
     valid = {k: v for k, v in candidates.items() if v is not None}
+    win_rmse = safe_float(model_info.get("winner_rmse"))
 
-    if valid:
-        best = min(valid, key=valid.get)
-        return best, round(valid[best], 4), {k: round(v, 4) for k, v in valid.items()}
+    if valid and win_rmse:
+        # Match name to value
+        best = "N/A"
+        for name, val in valid.items():
+            if abs(val - win_rmse) < 1e-6: # Floating point safe comparison
+                best = name
+                break
+        return best, round(win_rmse, 4), {k: round(v, 4) for k, v in valid.items()}
 
-    # Fallback: registry only has 'winner' + 'winner_rmse' (old model version)
-    fallback_name = model_info.get("winner", "N/A")
-    fallback_rmse = safe_float(model_info.get("winner_rmse"))
-    all_rmse = {fallback_name: round(fallback_rmse, 4)} if fallback_rmse else {}
-    return fallback_name, fallback_rmse, all_rmse
+    return "N/A", win_rmse, {k: round(v, 4) for k, v in valid.items()}
 
 
 def aqi_category(val):
@@ -168,16 +166,15 @@ def load_all_data():
                 if models:
                     latest = models[0]
                     m = latest.training_metrics
+                    # Extracting keys to match screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
                     model_info = {
                         "name":           latest.name,
                         "version":        latest.version,
                         "ensemble_rmse":  m.get("test_rmse",          "N/A"),
                         "winner_rmse":    m.get("winner_rmse",         "N/A"),
-                        "winner":         m.get("winner",              "N/A"),
-                        # per-model keys saved by the fixed training pipeline
-                        "rf_rmse":        m.get("RandomForest_rmse",   "N/A"),
-                        "xgb_rmse":       m.get("XGBoost_rmse",        "N/A"),
-                        "svr_rmse":       m.get("SVR_rmse",            "N/A"),
+                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
+                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
+                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
                         "description":    latest.description,
                     }
             except Exception:
@@ -242,21 +239,11 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                   help="Average predicted AQI over next 3 days")
 
     with k3:
-        # Show winner_rmse if available, otherwise ensemble rmse, otherwise "Pending"
-        rmse_display = (
-            str(winner_rmse)
-            if winner_rmse is not None
-            else (
-                str(round(float(model_info["ensemble_rmse"]), 4))
-                if safe_float(model_info.get("ensemble_rmse")) is not None
-                else "Pending"
-            )
-        )
+        rmse_display = str(winner_rmse) if winner_rmse is not None else "Pending"
         st.metric("Winner RMSE", rmse_display,
                   help="Lowest test RMSE among RandomForest / XGBoost / SVR")
 
     with k4:
-        # Always the best individual model name — never "Ensemble"
         top_model_display = winner_name if winner_name not in ("N/A", None, "") else "Pending"
         st.metric("Top Model", top_model_display,
                   help="Individual model with lowest test RMSE")
@@ -303,7 +290,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=forecast_df['date'], y=forecast_df['daily_avg_aqi'],
-        mode='lines+markers', name='Daily Avg AQI',
+        mode='markers+lines', name='Daily Avg AQI',
         line=dict(color='#00d4ff', width=3),
         marker=dict(size=13, color='#00d4ff', line=dict(color='#0d1b2a', width=2.5)),
         fill='tozeroy', fillcolor='rgba(0,212,255,0.12)',
@@ -345,7 +332,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 
-    # Build rows as plain Python — no f-string HTML soup
     table_rows = []
     for mname, icon, rmse_key, accent in MODELS_META:
         raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"

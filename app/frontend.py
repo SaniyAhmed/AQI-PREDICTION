@@ -178,10 +178,22 @@ def load_all_data():
                 pass
 
             try:
+
+            try:
                 # Fetch ALL models and sort by version (highest first) to get the LATEST
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    latest = max(models, key=lambda x: x.version)
+                    # Sort version descending (handle potential string versions safely)
+                    models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
+                    
+                    latest = models_sorted[0]
+                    # Try to find the first model that actually has the new metrics
+                    for model in models_sorted:
+                        # Check for one of the new keys from the latest pipeline
+                        if "winner_rmse" in model.training_metrics or "randomforest_rmse" in model.training_metrics:
+                            latest = model
+                            break
+                    
                     m = latest.training_metrics
                     model_info = {
                         "name":           latest.name,

@@ -179,22 +179,31 @@ def load_all_data():
 
 
             try:
-                # get_models() returns summaries; full-fetch the latest version
+                # Fetch ALL models and sort by version (highest first) to get the LATEST
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    latest_version = max(int(x.version) for x in models)
-                    latest = mr.get_model("karachi_aqi_model", version=latest_version)
-                    m = latest.training_metrics or {}
-
+                    # Sort version descending (handle potential string versions safely)
+                    models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
+                    
+                    latest = models_sorted[0]
+                    # Try to find the first model that actually has the new metrics
+                    for model in models_sorted:
+                        # Check for one of the new keys from the latest pipeline
+                        if "winner_rmse" in model.training_metrics or "randomforest_rmse" in model.training_metrics:
+                            latest = model
+                            break
+                    
+                    m = latest.training_metrics
                     model_info = {
                         "name":           latest.name,
                         "version":        latest.version,
                         "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
                         "winner_rmse":    m.get("winner_rmse", "N/A"),
                         "winner":         m.get("winner", "N/A"),
-                        "rf_rmse":        m.get("randomforest_rmse", "N/A"),
-                        "xgb_rmse":       m.get("xgboost_rmse",      "N/A"),
-                        "svr_rmse":       m.get("svr_rmse",           "N/A"),
+                        # keys from user screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
+                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
+                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
+                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
                         "description":    latest.description,
                     }
             except Exception:
@@ -259,16 +268,16 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                   help="Average predicted AQI over next 3 days")
 
     with k3:
-        # Priority: registry winner_rmse -> computed winner_rmse -> ensemble -> Pending
-        registry_wr = safe_float(model_info.get("winner_rmse"))
-        if registry_wr is not None:
-            rmse_display = str(round(registry_wr, 4))
-        elif winner_rmse is not None:
-            rmse_display = str(round(winner_rmse, 4)) if isinstance(winner_rmse, float) else str(winner_rmse)
-        elif safe_float(model_info.get("ensemble_rmse")) is not None:
-            rmse_display = str(round(float(model_info.get("ensemble_rmse")), 4))
-        else:
-            rmse_display = "Pending"
+        # Show winner_rmse if available, otherwise ensemble rmse, otherwise "Pending"
+        rmse_display = (
+            str(winner_rmse)
+            if winner_rmse is not None
+            else (
+                str(round(float(model_info.get("ensemble_rmse")), 4))
+                if safe_float(model_info.get("ensemble_rmse")) is not None
+                else "Pending"
+            )
+        )
         st.metric("Winner RMSE", rmse_display,
                   help="Lowest test RMSE among RandomForest / XGBoost / SVR")
 
@@ -311,7 +320,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Trend Chart ��──────────────────────────────────────────────────────────
+    # ── Trend Chart ───────────────────────────────────────────────────────────
     st.markdown(
         '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
         '📈 3-DAY AQI FORECAST TREND</h2>',

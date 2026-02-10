@@ -125,6 +125,16 @@ def run_pipeline():
     winner_name = res_df.iloc[0]['Model']
     winner_rmse = res_df.iloc[0]['Test RMSE']
 
+    # Build a dict of each individual model's Test RMSE for the registry
+    # Keys will be: randomforest_rmse, xgboost_rmse, svr_rmse
+    individual_rmses = {}
+    for _, row in res_df.iterrows():
+        model_key = row['Model'].lower() + "_rmse"
+        individual_rmses[model_key] = float(row['Test RMSE'])
+
+    print(f"\n   Winner: {winner_name} (RMSE: {winner_rmse:.4f})")
+    print(f"   Individual RMSEs: {individual_rmses}")
+
     # 4. ENSEMBLE TRAINING
     ensemble_model = VotingRegressor(best_estimators, weights=[1, 2, 2])
     ensemble_model.fit(X_train_s, y_train)

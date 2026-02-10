@@ -90,8 +90,8 @@ def get_winner_from_rmse(model_info: dict):
     (winner_name, winner_rmse_float, {name: rmse_float}).
     """
     candidates = {
-        "RandomForest": safe_float(model_info.get("rf_rmse")),
-        "XGBoost":      safe_float(model_info.get("xgb_rmse")),
+        "RandomForest": safe_float(model_info.get("randomforest_rmse")),
+        "XGBoost":      safe_float(model_info.get("xgboost_rmse")),
         "SVR":          safe_float(model_info.get("svr_rmse")),
     }
     valid = {k: v for k, v in candidates.items() if v is not None}
@@ -211,8 +211,8 @@ def load_all_data():
                         "winner_rmse":    m.get("winner_rmse", "N/A"),
                         "winner":         m.get("winner", "N/A"),
                         # keys from Hopsworks screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
-                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
-                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
+                        "randomforest_rmse":        m.get("randomforest_rmse",   "N/A"),
+                        "xgboost_rmse":       m.get("xgboost_rmse",        "N/A"),
                         "svr_rmse":       m.get("svr_rmse",            "N/A"),
                         "description":    latest.description,
                     }
@@ -380,8 +380,8 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     )
 
     MODELS_META = [
-        ("RandomForest", "🌲", "rf_rmse",  "#4caf50"),
-        ("XGBoost",      "⚡", "xgb_rmse", "#00d4ff"),
+        ("RandomForest", "🌲", "randomforest_rmse",  "#4caf50"),
+        ("XGBoost",      "⚡", "xgboost_rmse", "#00d4ff"),
         ("SVR",          "📐", "svr_rmse",  "#ff9800"),
     ]
 

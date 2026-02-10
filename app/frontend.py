@@ -71,12 +71,64 @@ div[data-testid="metric-container"] [data-testid="stMetricValue"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ── Data Fetching ────────────────────────────────────────────────────────────
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def safe_float(val):
+    """Convert a registry metric value to float, or return None."""
+    try:
+        f = float(val)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def get_winner_from_rmse(model_info: dict):
+    """
+    Compare the three individual model RMSEs stored in model_info and return
+    (winner_name, winner_rmse_float, {name: rmse_float}).
+
+    Priority order:
+      1. Computed from per-model RMSE keys  (set by the fixed training pipeline)
+      2. Fallback: use the stored 'winner' name + 'winner_rmse' scalar value
+    """
+    candidates = {
+        "RandomForest": safe_float(model_info.get("rf_rmse")),
+        "XGBoost":      safe_float(model_info.get("xgb_rmse")),
+        "SVR":          safe_float(model_info.get("svr_rmse")),
+    }
+    valid = {k: v for k, v in candidates.items() if v is not None}
+
+    if valid:
+        best = min(valid, key=valid.get)
+        return best, round(valid[best], 4), {k: round(v, 4) for k, v in valid.items()}
+
+    # Fallback: registry only has 'winner' + 'winner_rmse' (old model version)
+    fallback_name = model_info.get("winner", "N/A")
+    fallback_rmse = safe_float(model_info.get("winner_rmse"))
+    all_rmse = {fallback_name: round(fallback_rmse, 4)} if fallback_rmse else {}
+    return fallback_name, fallback_rmse, all_rmse
+
+
+def aqi_category(val):
+    for threshold, cat, icon, bg, accent in [
+        (50,  "Good",            "🟢", "#1a3a1a", "#4caf50"),
+        (100, "Moderate",        "🟡", "#3a3010", "#ffc107"),
+        (150, "Unhealthy (SG)", "🟠", "#3a2010", "#ff9800"),
+        (200, "Unhealthy",       "🔴", "#3a1010", "#f44336"),
+        (999, "Hazardous",       "🟣", "#2a0a2a", "#9c27b0"),
+    ]:
+        if val <= threshold:
+            return cat, icon, bg, accent
+    return "Hazardous", "🟣", "#2a0a2a", "#9c27b0"
+
+
+# ── Data Fetching ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_all_data():
     daily_summary_df = None
-    current_aqi = None
-    model_info = {}
+    current_aqi      = None
+    model_info       = {}
 
     local_file = "data/forecast_data.csv"
     if os.path.exists(local_file):
@@ -114,17 +166,19 @@ def load_all_data():
             try:
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    latest_model = models[0]
-                    metrics = latest_model.training_metrics
+                    latest = models[0]
+                    m = latest.training_metrics
                     model_info = {
-                        "name": latest_model.name,
-                        "version": latest_model.version,
-                        "ensemble_rmse": metrics.get("test_rmse", "N/A"),
-                        "rf_rmse":       metrics.get("RandomForest_rmse", "N/A"),
-                        "xgb_rmse":      metrics.get("XGBoost_rmse", "N/A"),
-                        "svr_rmse":      metrics.get("SVR_rmse", "N/A"),
-                        "winner":        metrics.get("winner", "N/A"),
-                        "description":   latest_model.description,
+                        "name":           latest.name,
+                        "version":        latest.version,
+                        "ensemble_rmse":  m.get("test_rmse",          "N/A"),
+                        "winner_rmse":    m.get("winner_rmse",         "N/A"),
+                        "winner":         m.get("winner",              "N/A"),
+                        # per-model keys saved by the fixed training pipeline
+                        "rf_rmse":        m.get("RandomForest_rmse",   "N/A"),
+                        "xgb_rmse":       m.get("XGBoost_rmse",        "N/A"),
+                        "svr_rmse":       m.get("SVR_rmse",            "N/A"),
+                        "description":    latest.description,
                     }
             except Exception:
                 pass
@@ -136,41 +190,9 @@ def load_all_data():
     return daily_summary_df, current_aqi, model_info
 
 
-def get_winner_from_rmse(model_info: dict):
-    """Returns (winner_name, winner_rmse, {name: rmse}) based on lowest test RMSE
-    among RandomForest, XGBoost and SVR — never returns 'Ensemble'."""
-    candidates = {
-        "RandomForest": model_info.get("rf_rmse",  "N/A"),
-        "XGBoost":      model_info.get("xgb_rmse", "N/A"),
-        "SVR":          model_info.get("svr_rmse",  "N/A"),
-    }
-    valid = {k: float(v) for k, v in candidates.items() if v not in ("N/A", None)}
-    if valid:
-        best = min(valid, key=valid.get)
-        return best, round(valid[best], 4), valid
-    # graceful fallback: use the stored "winner" field (set by training_pipeline.py)
-    fallback = model_info.get("winner", "N/A")
-    return fallback, "N/A", {}
-
-
-def aqi_category(val):
-    levels = [
-        (50,  "Good",            "🟢", "#1a3a1a", "#4caf50"),
-        (100, "Moderate",        "🟡", "#3a3010", "#ffc107"),
-        (150, "Unhealthy (SG)", "🟠", "#3a2010", "#ff9800"),
-        (200, "Unhealthy",       "🔴", "#3a1010", "#f44336"),
-        (999, "Hazardous",       "🟣", "#2a0a2a", "#9c27b0"),
-    ]
-    for threshold, cat, icon, bg, accent in levels:
-        if val <= threshold:
-            return cat, icon, bg, accent
-    return "Hazardous", "🟣", "#2a0a2a", "#9c27b0"
-
-
-# ── Load Data ────────────────────────────────────────────────────────────────
 daily_summary_df, current_aqi, model_info = load_all_data()
 
-# ── Header ───────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div style="display:flex;align-items:center;gap:14px;margin-bottom:4px;">
   <span style="font-size:2.6rem;">🌬️</span>
@@ -185,7 +207,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-# ── Main Content ─────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 if daily_summary_df is not None and not daily_summary_df.empty:
 
     grand_avg = (
@@ -194,7 +216,6 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         else daily_summary_df['daily_avg_aqi'].mean()
     )
 
-    # Timezone-safe filter
     today = pd.Timestamp.utcnow().normalize().tz_localize(None)
     dates_tz_naive = (
         daily_summary_df['date'].dt.tz_localize(None)
@@ -208,26 +229,41 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     winner_name, winner_rmse, all_rmse = get_winner_from_rmse(model_info)
 
-    # ── KPI Row ──────────────────────────────────────────────────────────────
+    # ── KPI Row ───────────────────────────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
+
     with k1:
         val = round(current_aqi, 1) if current_aqi else round(forecast_df.iloc[0]['daily_avg_aqi'], 1)
         st.metric("Current AQI" if current_aqi else "Latest AQI", str(val),
                   help="Latest measured AQI value")
+
     with k2:
         st.metric("3-Day Average", str(round(grand_avg, 1)),
                   help="Average predicted AQI over next 3 days")
+
     with k3:
-        st.metric("Winner RMSE", str(winner_rmse) if winner_rmse != "N/A" else "—",
+        # Show winner_rmse if available, otherwise ensemble rmse, otherwise "Pending"
+        rmse_display = (
+            str(winner_rmse)
+            if winner_rmse is not None
+            else (
+                str(round(float(model_info["ensemble_rmse"]), 4))
+                if safe_float(model_info.get("ensemble_rmse")) is not None
+                else "Pending"
+            )
+        )
+        st.metric("Winner RMSE", rmse_display,
                   help="Lowest test RMSE among RandomForest / XGBoost / SVR")
+
     with k4:
-        # Always the best individual model — never "Ensemble"
-        st.metric("Top Model", winner_name if winner_name != "N/A" else "—",
+        # Always the best individual model name — never "Ensemble"
+        top_model_display = winner_name if winner_name not in ("N/A", None, "") else "Pending"
+        st.metric("Top Model", top_model_display,
                   help="Individual model with lowest test RMSE")
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Daily Forecast Cards ─────────────────────────────────────────────────
+    # ── Daily Forecast Cards ──────────────────────────────────────────────────
     st.markdown(
         '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
         '📊 DAILY FORECAST BREAKDOWN</h2>',
@@ -251,9 +287,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
                 {date_str}
               </p>
               <p style="margin:8px 0 4px;font-family:'Rajdhani',sans-serif;font-size:3rem;
-                        font-weight:700;color:#ffffff;line-height:1;">
-                {aqi_val}
-              </p>
+                        font-weight:700;color:#ffffff;line-height:1;">{aqi_val}</p>
               <p style="margin:0;font-size:0.85rem;color:#b0c8e0;">{icon}&nbsp;&nbsp;{cat}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -276,7 +310,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
         hovertemplate='<b>%{x|%b %d, %Y}</b><br>AQI: %{y:.1f}<extra></extra>'
     ))
     fig.add_hline(y=grand_avg, line_dash="dot", line_color="#ffd166", line_width=2,
-                  annotation_text=f"3-Day Avg: {round(grand_avg,1)}",
+                  annotation_text=f"3-Day Avg: {round(grand_avg, 1)}",
                   annotation_position="top right",
                   annotation_font_color="#ffd166")
     fig.add_hrect(y0=0,   y1=50,  fillcolor="#4caf50", opacity=0.07, line_width=0)
@@ -284,9 +318,12 @@ if daily_summary_df is not None and not daily_summary_df.empty:
     fig.add_hrect(y0=100, y1=150, fillcolor="#ff9800", opacity=0.07, line_width=0)
     fig.add_hrect(y0=150, y1=200, fillcolor="#f44336", opacity=0.07, line_width=0)
     fig.update_layout(
-        template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        xaxis_title="Date", yaxis_title="AQI", hovermode='x unified', height=420,
-        font=dict(family='Rajdhani, Inter, sans-serif'), showlegend=False,
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis_title="Date", yaxis_title="AQI",
+        hovermode='x unified', height=420,
+        font=dict(family='Rajdhani, Inter, sans-serif'),
+        showlegend=False,
         xaxis=dict(gridcolor='#1e3a5f', linecolor='#1e3a5f'),
         yaxis=dict(gridcolor='#1e3a5f', linecolor='#1e3a5f'),
         margin=dict(l=10, r=10, t=20, b=20),
@@ -295,81 +332,85 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Model Comparison Table (RF / XGBoost / SVR only) ─────────────────────
+    # ── Model Comparison Table ────────────────────────────────────────────────
     st.markdown(
         '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
         '🤖 MODEL PERFORMANCE COMPARISON</h2>',
         unsafe_allow_html=True
     )
 
-    MODELS_META = {
-        "RandomForest": {"icon": "🌲", "rmse_key": "rf_rmse",  "color": "#4caf50"},
-        "XGBoost":      {"icon": "⚡", "rmse_key": "xgb_rmse", "color": "#00d4ff"},
-        "SVR":          {"icon": "📐", "rmse_key": "svr_rmse",  "color": "#ff9800"},
-    }
+    MODELS_META = [
+        ("RandomForest", "🌲", "rf_rmse",  "#4caf50"),
+        ("XGBoost",      "⚡", "xgb_rmse", "#00d4ff"),
+        ("SVR",          "📐", "svr_rmse",  "#ff9800"),
+    ]
 
-    rows_html = ""
-    for mname, meta in MODELS_META.items():
-        rmse_raw = model_info.get(meta["rmse_key"], "N/A") if model_info else "N/A"
-        try:
-            rmse_str = f"{float(rmse_raw):.4f}"
-        except (ValueError, TypeError):
-            rmse_str = "—"
+    # Build rows as plain Python — no f-string HTML soup
+    table_rows = []
+    for mname, icon, rmse_key, accent in MODELS_META:
+        raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
+        rmse_f   = safe_float(raw_val)
+        rmse_str = f"{rmse_f:.4f}" if rmse_f is not None else "Pending"
 
-        is_winner = (mname == winner_name)
-        row_bg    = "rgba(0,212,255,0.07)" if is_winner else "rgba(255,255,255,0.02)"
-        badge     = (
+        is_winner   = (mname == winner_name)
+        row_bg      = "rgba(0,212,255,0.07)" if is_winner else "rgba(255,255,255,0.02)"
+        status_cell = (
             '<span style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff55;'
             'border-radius:6px;padding:2px 10px;font-size:0.72rem;letter-spacing:0.1em;'
             'font-weight:700;">🏆 WINNER</span>'
-        ) if is_winner else "—"
-        accent = meta["color"]
+            if is_winner else
+            '<span style="color:#4a6a8a;font-size:0.85rem;">—</span>'
+        )
 
-        rows_html += f"""
+        table_rows.append(f"""
         <tr style="background:{row_bg};border-bottom:1px solid #1e3a5f44;">
-          <td style="padding:14px 18px;font-family:'Rajdhani',sans-serif;font-size:1.05rem;
+          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
                      color:{accent};font-weight:600;letter-spacing:0.04em;">
-            {meta['icon']}&nbsp; {mname}
+            {icon}&nbsp; {mname}
           </td>
-          <td style="padding:14px 18px;font-family:'Rajdhani',sans-serif;font-size:1.05rem;
+          <td style="padding:14px 18px;font-family:Rajdhani,sans-serif;font-size:1.05rem;
                      color:#c8dff0;text-align:center;">
             {rmse_str}
           </td>
-          <td style="padding:14px 18px;text-align:center;">{badge}</td>
-        </tr>
-        """
+          <td style="padding:14px 18px;text-align:center;">{status_cell}</td>
+        </tr>""")
+
+    rows_joined = "\n".join(table_rows)
 
     st.markdown(f"""
-    <div style="border-radius:14px;overflow:hidden;border:1px solid #1e3a5f;
-                box-shadow:0 4px 24px rgba(0,0,0,0.4);margin-bottom:8px;">
-      <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;">
-        <thead>
-          <tr style="background:linear-gradient(90deg,#0d2040,#112240);border-bottom:2px solid #1e3a5f;">
-            <th style="padding:12px 18px;text-align:left;font-family:'Rajdhani',sans-serif;
-                       letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-              Model
-            </th>
-            <th style="padding:12px 18px;text-align:center;font-family:'Rajdhani',sans-serif;
-                       letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-              Test RMSE ↓
-            </th>
-            <th style="padding:12px 18px;text-align:center;font-family:'Rajdhani',sans-serif;
-                       letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
-              Status
-            </th>
-          </tr>
-        </thead>
-        <tbody>{rows_html}</tbody>
-      </table>
-    </div>
-    <p style="font-family:'Inter',sans-serif;font-size:0.78rem;color:#4a6a8a;margin-top:6px;">
-      ↓ Lower RMSE = better accuracy. The winner feeds into the Voting Ensemble at 2× weight.
-    </p>
-    """, unsafe_allow_html=True)
+<div style="border-radius:14px;overflow:hidden;border:1px solid #1e3a5f;
+            box-shadow:0 4px 24px rgba(0,0,0,0.4);margin-bottom:8px;">
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr style="background:linear-gradient(90deg,#0d2040,#112240);
+                 border-bottom:2px solid #1e3a5f;">
+        <th style="padding:12px 18px;text-align:left;font-family:Rajdhani,sans-serif;
+                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
+          Model
+        </th>
+        <th style="padding:12px 18px;text-align:center;font-family:Rajdhani,sans-serif;
+                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
+          Test RMSE ↓
+        </th>
+        <th style="padding:12px 18px;text-align:center;font-family:Rajdhani,sans-serif;
+                   letter-spacing:0.12em;text-transform:uppercase;color:#7ca9d4;font-size:0.78rem;">
+          Status
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      {rows_joined}
+    </tbody>
+  </table>
+</div>
+<p style="font-size:0.78rem;color:#4a6a8a;margin-top:6px;">
+  ↓ Lower RMSE = better accuracy. Winner feeds into the Voting Ensemble at 2× weight.
+</p>
+""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-    # ── Map + Insight side by side ────────────────────────────────────────────
+    # ── Map + Insight ─────────────────────────────────────────────────────────
     col_map, col_insight = st.columns([1.05, 1])
 
     with col_map:
@@ -468,7 +509,7 @@ else:
     - Review logs for errors
     """)
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("ℹ️ About")
 st.sidebar.info("""
 **Karachi AQI Sentinel** monitors air quality in Karachi, Pakistan using machine learning.

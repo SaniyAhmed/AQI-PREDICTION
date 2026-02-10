@@ -347,6 +347,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
+
     # ── Model Comparison Table ────────────────────────────────────────────────
     st.markdown(
         '<h2 style="font-family:Rajdhani,sans-serif;color:#e2f0ff;letter-spacing:0.07em;">'
@@ -362,17 +363,23 @@ if daily_summary_df is not None and not daily_summary_df.empty:
 
     # Build rows as plain Python — no f-string HTML soup
     table_rows = []
+    
+    # 1. First ensure we have the definitive winner RMSE from registry
+    definitive_winner_rmse = safe_float(model_info.get("winner_rmse"))
+    
     for mname, icon, rmse_key, accent in MODELS_META:
         raw_val  = model_info.get(rmse_key, "N/A") if model_info else "N/A"
         rmse_f   = safe_float(raw_val)
         rmse_str = f"{rmse_f:.4f}" if rmse_f is not None else "Pending"
 
         is_winner = False
-        if winner_rmse is not None and rmse_f is not None:
-             if abs(rmse_f - winner_rmse) < 0.0001:
+        
+        # Priority 1: Match the specific registry winner_rmse value
+        if definitive_winner_rmse is not None and rmse_f is not None:
+             if abs(rmse_f - definitive_winner_rmse) < 0.0001:
                  is_winner = True
         
-        # If winner_name is explicitly set and matches (fallback)
+        # Priority 2: Fallback to name match if RMSE approach failed/ambiguous
         if not is_winner and winner_name == mname:
              is_winner = True
 
@@ -418,7 +425,7 @@ if daily_summary_df is not None and not daily_summary_df.empty:
       </tr>
     </thead>
     <tbody>
-      {{rows_joined}}
+      {rows_joined}
     </tbody>
   </table>
 </div>

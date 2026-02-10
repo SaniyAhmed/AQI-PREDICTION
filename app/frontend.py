@@ -177,7 +177,6 @@ def load_all_data():
             except Exception:
                 pass
 
-            try:
 
             try:
                 # Fetch ALL models and sort by version (highest first) to get the LATEST

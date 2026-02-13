@@ -77,8 +77,8 @@ def run_pipeline():
     mr = project.get_model_registry()
     
     # 1. FETCH DATA
-    print("🎬 Reading Data from Feature Group: karachi_aqi (v4)...")
-    fg = fs.get_feature_group(name="karachi_aqi", version=4)
+    print("🎬 Reading Data from Feature Group: karachi_aqi (v5)...")
+    fg = fs.get_feature_group(name="karachi_aqi", version=5)
     full_df = fg.read().sort_values(['year', 'month', 'day', 'hour']).dropna()
     
     latest_actuals = full_df.iloc[-1].to_dict()
@@ -180,7 +180,7 @@ def run_pipeline():
         row = X_f_base.iloc[[i]].copy()
         if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
         suggestion = ensemble_model.predict(scaler.transform(row))[0]
-        next_step = (moving_state_aqi * 0.85) + (suggestion * 0.15)
+        next_step = (moving_state_aqi * 0.5) + (suggestion * 0.5)
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 

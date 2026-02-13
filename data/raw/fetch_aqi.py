@@ -19,10 +19,10 @@ end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
 print(f"📡 Fetching Karachi Data (from {start_date} to {end_date})...")
 
-# 1. Fetch Gas/Pollutant Data
+# 1. Fetch Gas/Pollutant Data (Now including us_aqi)
 aq_params = {
     "latitude": KARACHI_LAT, "longitude": KARACHI_LON,
-    "hourly": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone",
+    "hourly": "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi",
     "start_date": start_date, "end_date": end_date, "timezone": "auto"
 }
 aq_res = requests.get(AQ_URL, params=aq_params).json()
@@ -67,14 +67,8 @@ final_df['pressure'] = df['surface_pressure']
 final_df['wind_speed'] = df['wind_speed_10m']
 final_df['dew_point'] = df['dew_point_2m']
 
-# 4. Calculate 'aqi' (Target)
-def calculate_aqi(pm):
-    if pm <= 12: return (50/12) * pm
-    elif pm <= 35.4: return ((100-51)/(35.4-12.1)) * (pm-12.1) + 51
-    else: return 150 
-
-# Step-by-step calculation to avoid KeyError
-final_df['aqi'] = final_df['pm25'].apply(calculate_aqi)
+# 4. Use API-provided AQI (Target)
+final_df['aqi'] = df['us_aqi']
 final_df['aqi_change_rate'] = final_df['aqi'].diff().fillna(0.0)
 
 # --- SAVE ---

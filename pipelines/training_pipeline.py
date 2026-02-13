@@ -33,24 +33,37 @@ def get_forecast_features(trained_columns, latest_actuals):
             "forecast_days": 3
         }, timeout=30).json()
         
+        # Try city-based pollution endpoint first
         pollution_url = f"http://api.openweathermap.org/data/2.5/air_pollution/forecast?lat={KARACHI_LAT}&lon={KARACHI_LON}&appid={OWM_API_KEY}"
         pollution_res = session.get(pollution_url, timeout=30).json()
+        
+        # Check if we got valid data
+        if 'list' not in pollution_res:
+            print(f"⚠️ Pollution API returned: {pollution_res}")
+            # Fall back to using latest actual PM values
+            print("⚠️ Using last known PM2.5 and PM10 values for forecast")
+            df_w = pd.DataFrame(weather_res["hourly"])
+            df_w['time'] = pd.to_datetime(df_w['time'])
+            df_w['pm25'] = latest_actuals.get('pm25', 50.0)
+            df_w['pm10'] = latest_actuals.get('pm10', 100.0)
+            df_f = df_w
+        else:
+            df_w = pd.DataFrame(weather_res["hourly"])
+            df_w['time'] = pd.to_datetime(df_w['time'])
+            
+            pollutant_list = []
+            for entry in pollution_res['list']:
+                pollutant_list.append({
+                    'time': pd.to_datetime(entry['dt'], unit='s'),
+                    'pm25': float(entry['components']['pm2_5']),
+                    'pm10': float(entry['components']['pm10'])
+                })
+            df_p = pd.DataFrame(pollutant_list)
+            df_f = pd.merge_asof(df_w.sort_values('time'), df_p.sort_values('time'), on='time', direction='nearest')
+            
     except Exception as e:
         print(f"⚠️ API Fetch Error: {e}")
         return pd.DataFrame(), pd.Series()
-    
-    df_w = pd.DataFrame(weather_res["hourly"])
-    df_w['time'] = pd.to_datetime(df_w['time'])
-    
-    pollutant_list = []
-    for entry in pollution_res['list']:
-        pollutant_list.append({
-            'time': pd.to_datetime(entry['dt'], unit='s'),
-            'pm25': float(entry['components']['pm2_5']),
-            'pm10': float(entry['components']['pm10'])
-        })
-    df_p = pd.DataFrame(pollutant_list)
-    df_f = pd.merge_asof(df_w.sort_values('time'), df_p.sort_values('time'), on='time', direction='nearest')
     
     prep = pd.DataFrame({
         'year': df_f['time'].dt.year.astype('int64'), 
@@ -171,17 +184,29 @@ def run_pipeline():
 
     # 6. FORECAST GENERATION
     print("\n🔮 Generating 3-day Forecast...")
+    print(f"📍 Starting from current AQI: {current_aqi}")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
-    if X_f_base.empty: return
+    if X_f_base.empty: 
+        print("❌ Failed to fetch forecast features. Exiting.")
+        return
     
     predictions = []
     moving_state_aqi = current_aqi 
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
-        if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
-        prediction = ensemble_model.predict(scaler.transform(row))[0]
-        predictions.append(float(prediction))
-        moving_state_aqi = prediction
+        if 'aqi_lag_1' in row.columns: 
+            row['aqi_lag_1'] = moving_state_aqi
+        
+        raw_prediction = ensemble_model.predict(scaler.transform(row))[0]
+        
+        # DIAGNOSTIC: Print first 5 predictions to see what's happening
+        if i < 5:
+            print(f"   Hour {i}: lag={moving_state_aqi:.2f} → raw_pred={raw_prediction:.2f}")
+        
+        predictions.append(float(raw_prediction))
+        moving_state_aqi = raw_prediction
+
+    print(f"📊 First prediction: {predictions[0]:.2f}, Last prediction: {predictions[-1]:.2f}")
 
     # 7. HOURLY DATA PREP
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()

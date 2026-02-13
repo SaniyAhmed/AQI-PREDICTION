@@ -179,10 +179,9 @@ def run_pipeline():
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
         if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
-        suggestion = ensemble_model.predict(scaler.transform(row))[0]
-        next_step = (moving_state_aqi * 0.85) + (suggestion * 0.15)
-        predictions.append(float(next_step))
-        moving_state_aqi = next_step 
+        prediction = ensemble_model.predict(scaler.transform(row))[0]
+        predictions.append(float(prediction))
+        moving_state_aqi = prediction
 
     # 7. HOURLY DATA PREP
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()

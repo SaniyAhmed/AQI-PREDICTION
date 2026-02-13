@@ -137,7 +137,6 @@ def aqi_category(val):
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 
-# ── Data Fetching ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_all_data():
     daily_summary_df = None
@@ -170,6 +169,7 @@ def load_all_data():
                     st.warning(f"Could not fetch daily summary: {e}")
 
             try:
+                # FIXED: Now reading from version 5 instead of version 4
                 fg_historical = fs.get_feature_group(name="karachi_aqi", version=5)
                 historical_df = fg_historical.read().sort_values(['year', 'month', 'day', 'hour'])
                 if not historical_df.empty:

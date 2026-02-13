@@ -170,7 +170,7 @@ def load_all_data():
                     st.warning(f"Could not fetch daily summary: {e}")
 
             try:
-                fg_historical = fs.get_feature_group(name="karachi_aqi", version=4)
+                fg_historical = fs.get_feature_group(name="karachi_aqi", version=5)
                 historical_df = fg_historical.read().sort_values(['year', 'month', 'day', 'hour'])
                 if not historical_df.empty:
                     current_aqi = float(historical_df.iloc[-1]['aqi'])

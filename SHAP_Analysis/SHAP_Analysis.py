@@ -1,6 +1,7 @@
 import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend to avoid Windows display issues
 import matplotlib.pyplot as plt
-plt.close('all')
+plt.ioff()  # Turn off interactive mode
 import os
 import joblib
 import pandas as pd
@@ -9,6 +10,11 @@ import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap
 import shap
 import hopsworks
+import warnings
+
+# Suppress version warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='.*InconsistentVersionWarning.*')
 
 # --- PROFESSIONAL THEME ---
 COLORS = {
@@ -43,29 +49,59 @@ def setup_style():
         "axes.spines.right": False,
     })
 
+def safe_close_all():
+    """Safely close all matplotlib figures"""
+    try:
+        plt.close('all')
+    except:
+        pass
+
 def perform_enhanced_shap_analysis():
     setup_style()
 
-    print("Connecting to Hopsworks...")
+    print("🔐 Connecting to Hopsworks...")
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
     mr = project.get_model_registry()
 
-    fg = fs.get_feature_group(name="karachi_aqi", version=1)
+    print("📊 Loading data from feature group (version 5)...")
+    fg = fs.get_feature_group(name="karachi_aqi", version=5)
     df = fg.read()
     X = df.drop(columns=['aqi'])
     y = df['aqi']
 
-    model_meta = mr.get_model("karachi_aqi_randomforest", version=1)
+    print("🤖 Downloading latest model...")
+    # Get the latest model
+    models = mr.get_models("karachi_aqi_model")
+    models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
+    model_meta = models_sorted[0]
+    
     model_dir = model_meta.download()
-    model = joblib.load(os.path.join(model_dir, "karachi_aqi_model.pkl"))
+    model = joblib.load(os.path.join(model_dir, "model.pkl"))
     scaler = joblib.load(os.path.join(model_dir, "scaler.pkl"))
 
+    print("⚙️ Preparing data and creating SHAP explainer...")
     X_scaled = pd.DataFrame(scaler.transform(X), columns=X.columns)
-    explainer = shap.TreeExplainer(model)
+    
+    # For ensemble models, extract one estimator for SHAP
+    if hasattr(model, 'estimators_'):
+        # model.estimators_ is a list of (name, estimator) tuples
+        # Get the XGBoost model (index 1: RandomForest, XGBoost, SVR)
+        xgb_tuple = model.estimators_[1]
+        if isinstance(xgb_tuple, tuple):
+            actual_model = xgb_tuple[1]  # Extract the XGBRegressor
+        else:
+            actual_model = xgb_tuple
+        print(f"   Using {type(actual_model).__name__} from ensemble for SHAP analysis")
+        explainer = shap.TreeExplainer(actual_model)
+    else:
+        print(f"   Using {type(model).__name__} for SHAP analysis")
+        explainer = shap.TreeExplainer(model)
 
     sample_size = min(300, len(X_scaled))
     sample_X = X_scaled.head(sample_size)
+    
+    print(f"🔮 Computing SHAP values for {sample_size} samples...")
     shap_values = explainer.shap_values(sample_X)
 
     if isinstance(shap_values, list):
@@ -86,8 +122,9 @@ def perform_enhanced_shap_analysis():
     # =========================================================================
     # PLOT 1: EXECUTIVE SUMMARY DASHBOARD
     # =========================================================================
-    print("Generating Executive Summary Dashboard...")
-    plt.close('all')  # Close any existing figures
+    print("\n📈 [1/7] Generating Executive Summary Dashboard...")
+    safe_close_all()
+    
     fig = plt.figure(figsize=(16, 7.5), facecolor=COLORS["bg"])
     gs = gridspec.GridSpec(1, 3, width_ratios=[1, 1, 2], wspace=0.3,
                           left=0.04, right=0.96, top=0.85, bottom=0.12)
@@ -135,20 +172,21 @@ def perform_enhanced_shap_analysis():
     fig.suptitle("SHAP Executive Summary - What Drives Karachi's AQI?",
                   fontsize=15, fontweight='bold', color=COLORS["text"], y=0.96)
     
-    # Caption at the bottom
     fig.text(0.5, 0.02, "This dashboard shows the AI's baseline AQI, the top influential factor, and how all features rank by impact.",
             ha='center', fontsize=9, color=COLORS["text"], style='italic',
             bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
-    plt.savefig(os.path.join(output_dir, "1_executive_summary.png"), dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
-    print(f"Saved: {output_dir}/1_executive_summary.png")
-    plt.show()  # Display the figure
-    plt.close(fig)
+    
+    filepath = os.path.join(output_dir, "1_executive_summary.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+    print(f"   ✅ Saved: {filepath}")
+    safe_close_all()
 
     # =========================================================================
     # PLOT 2: BEESWARM
     # =========================================================================
-    print("Generating Beeswarm Impact Chart...")
-    plt.close('all')  # Close any existing figures
+    print("📈 [2/7] Generating Beeswarm Impact Chart...")
+    safe_close_all()
+    
     fig, ax = plt.subplots(figsize=(14, 8.5), facecolor=COLORS["bg"])
     fig.subplots_adjust(left=0.18, right=0.88, top=0.92, bottom=0.12)
     
@@ -173,16 +211,18 @@ def perform_enhanced_shap_analysis():
     fig.text(0.5, 0.02, "Each dot is one prediction - red means high feature value, blue means low; position shows whether it pushed AQI up or down.",
             ha='center', fontsize=9, color=COLORS["text"], style='italic',
             bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
-    plt.savefig(os.path.join(output_dir, "2_beeswarm.png"), dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
-    print(f"Saved: {output_dir}/2_beeswarm.png")
-    plt.show()  # Display the figure
-    plt.close(fig)
+    
+    filepath = os.path.join(output_dir, "2_beeswarm.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+    print(f"   ✅ Saved: {filepath}")
+    safe_close_all()
 
     # =========================================================================
     # PLOT 3: DEPENDENCE PLOTS
     # =========================================================================
-    print("Generating Dependence Plots...")
-    plt.close('all')  # Close any existing figures
+    print("📈 [3/7] Generating Dependence Plots...")
+    safe_close_all()
+    
     top3_features = [feature_names[i] for i in sorted_idx[-3:]][::-1]
 
     feature_descriptions = {
@@ -206,7 +246,6 @@ def perform_enhanced_shap_analysis():
     }
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 7), facecolor=COLORS["bg"])
-    
     fig.subplots_adjust(left=0.05, right=0.96, top=0.82, bottom=0.15, wspace=0.32)
 
     for i, feat in enumerate(top3_features):
@@ -251,21 +290,22 @@ def perform_enhanced_shap_analysis():
     fig.text(0.5, 0.02, "The trend line shows how a feature's value relates to its AQI impact; dot colors reveal which other feature interacts with it.",
             ha='center', fontsize=9, color=COLORS["text"], style='italic',
             bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
-    plt.savefig(os.path.join(output_dir, "3_dependence_plots.png"), dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
-    print(f"Saved: {output_dir}/3_dependence_plots.png")
-    plt.show()  # Display the figure
-    plt.close(fig)
+    
+    filepath = os.path.join(output_dir, "3_dependence_plots.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+    print(f"   ✅ Saved: {filepath}")
+    safe_close_all()
 
     # =========================================================================
-    # PLOT 4: WATERFALL
+    # PLOT 4: WATERFALL - PEAK POLLUTION
     # =========================================================================
-    print("Generating Waterfall Plot for peak pollution event...")
-    plt.close('all')  # Close any existing figures
+    print("📈 [4/7] Generating Waterfall Plot (Peak Pollution Event)...")
+    safe_close_all()
+    
     high_idx = y.head(sample_size).idxmax()
     explanation = shap.Explanation(values=sv[high_idx], base_values=ev, data=X.iloc[high_idx].values, feature_names=X.columns.tolist())
 
     fig, ax = plt.subplots(figsize=(13, 8.5), facecolor=COLORS["bg"])
-    
     fig.subplots_adjust(left=0.28, right=0.96, top=0.85, bottom=0.12)
     
     ax.set_facecolor(COLORS["card"])
@@ -282,32 +322,33 @@ def perform_enhanced_shap_analysis():
     fig.text(0.5, 0.02, "Starting from baseline AQI, each bar shows how much one factor pushed the prediction higher (red) or lower (blue) to reach the final value.",
             ha='center', fontsize=9, color=COLORS["text"], style='italic',
             bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
-    plt.savefig(os.path.join(output_dir, "4_waterfall_peak.png"), dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
-    print(f"Saved: {output_dir}/4_waterfall_peak.png")
-    plt.show()  # Display the figure
-    plt.close(fig)
+    
+    filepath = os.path.join(output_dir, "4_waterfall_peak.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+    print(f"   ✅ Saved: {filepath}")
+    safe_close_all()
 
     # =========================================================================
-    # PLOT 5: CLEAN vs POLLUTED
+    # PLOT 5 & 6: CLEAN vs POLLUTED DAYS
     # =========================================================================
-    print("Generating Clean vs Polluted Day Comparison...")
+    print("📈 [5-6/7] Generating Clean vs Polluted Day Comparison...")
     low_idx = y.head(sample_size).idxmin()
 
     scenarios = [
-        (low_idx, f"Cleanest Day (AQI: {y[low_idx]:.1f})", COLORS["green"]),
-        (high_idx, f"Worst Pollution Day (AQI: {y[high_idx]:.1f})", COLORS["red"])
+        (low_idx, f"Cleanest Day (AQI: {y[low_idx]:.1f})", COLORS["green"], "clean"),
+        (high_idx, f"Worst Pollution Day (AQI: {y[high_idx]:.1f})", COLORS["red"], "polluted")
     ]
     captions = [
         "On this clean day, low PM2.5 and favorable wind conditions kept pollutants dispersed - these factors pulled AQI down from baseline.",
         "On this polluted day, high PM2.5 and trapped humidity pushed AQI well above baseline - these are the conditions residents should watch for."
     ]
 
-    for i, (idx, title, border_color) in enumerate(scenarios):
-        plt.close('all')  # Close any existing figures
+    for i, (idx, title, border_color, scenario_name) in enumerate(scenarios):
+        safe_close_all()
+        
         exp = shap.Explanation(values=sv[idx], base_values=ev, data=X.iloc[idx].values, feature_names=X.columns.tolist())
 
         fig, ax = plt.subplots(figsize=(13, 8.5), facecolor=COLORS["bg"])
-        
         fig.subplots_adjust(left=0.28, right=0.96, top=0.82, bottom=0.12)
         
         ax.set_facecolor(COLORS["card"])
@@ -324,13 +365,75 @@ def perform_enhanced_shap_analysis():
         fig.text(0.5, 0.02, captions[i], ha='center', fontsize=9, color=COLORS["text"], style='italic',
                 bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
         
-        scenario_name = "clean" if i == 0 else "polluted"
-        plt.savefig(os.path.join(output_dir, f"5_waterfall_{scenario_name}.png"), dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
-        print(f"Saved: {output_dir}/5_waterfall_{scenario_name}.png")
-        plt.show()  # Display the figure
-        plt.close(fig)
+        filepath = os.path.join(output_dir, f"5_waterfall_{scenario_name}.png")
+        plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+        print(f"   ✅ Saved: {filepath}")
+        safe_close_all()
 
-    print(f"\nAll SHAP visualizations complete! Check the '{output_dir}' folder for all plots.")
+    # =========================================================================
+    # PLOT 7: BAR CHART - ALL FEATURES RANKED
+    # =========================================================================
+    print("📈 [7/7] Generating Complete Feature Importance Bar Chart...")
+    safe_close_all()
+    
+    # Sort all features by importance
+    all_sorted_idx = sorted_idx
+    all_names = [feature_names[i] for i in all_sorted_idx]
+    all_values = [mean_abs_shap[i] for i in all_sorted_idx]
+    
+    fig, ax = plt.subplots(figsize=(12, max(8, len(all_names) * 0.35)), facecolor=COLORS["bg"])
+    fig.subplots_adjust(left=0.2, right=0.95, top=0.93, bottom=0.08)
+    
+    ax.set_facecolor(COLORS["card"])
+    
+    # Create gradient colors
+    cmap = LinearSegmentedColormap.from_list("imp", [COLORS["gradient_low"], COLORS["accent"], COLORS["orange"]])
+    nv = np.array(all_values)
+    nv = (nv - nv.min()) / (nv.max() - nv.min() + 1e-9)
+    bar_colors = [cmap(v) for v in nv]
+    
+    bars = ax.barh(all_names, all_values, color=bar_colors, height=0.6, edgecolor=COLORS["card"], linewidth=1)
+    
+    # Add value labels
+    for bar, val in zip(bars, all_values):
+        ax.text(bar.get_width() + max(all_values) * 0.01, bar.get_y() + bar.get_height()/2,
+               f"{val:.4f}", va='center', fontsize=7, color=COLORS["text"], fontweight='bold')
+    
+    ax.set_xlabel("Mean |SHAP Value| (Average Impact on AQI)", color=COLORS["text"], fontsize=10, fontweight='bold')
+    ax.set_ylabel("Features", color=COLORS["text"], fontsize=10, fontweight='bold')
+    ax.set_xlim(0, max(all_values) * 1.15)
+    ax.tick_params(labelsize=8, colors=COLORS["text"])
+    ax.grid(axis='x', alpha=0.3, color=COLORS["muted"])
+    
+    fig.suptitle("Complete Feature Importance Ranking - All Features by SHAP Impact",
+                  fontsize=14, fontweight='bold', color=COLORS["text"], y=0.98)
+    
+    fig.text(0.5, 0.02, "Higher values mean the feature has a stronger average influence on AQI predictions (either pushing up or down).",
+            ha='center', fontsize=9, color=COLORS["text"], style='italic',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor=COLORS["card"], edgecolor=COLORS["muted"], alpha=0.9))
+    
+    filepath = os.path.join(output_dir, "7_all_features_ranked.png")
+    plt.savefig(filepath, dpi=300, bbox_inches='tight', facecolor=COLORS["bg"])
+    print(f"   ✅ Saved: {filepath}")
+    safe_close_all()
+
+    # =========================================================================
+    # COMPLETION
+    # =========================================================================
+    print("\n" + "="*80)
+    print("✨ ALL SHAP VISUALIZATIONS COMPLETE!")
+    print("="*80)
+    print(f"\n📁 Output Directory: {os.path.abspath(output_dir)}/")
+    print("\n📊 Generated Files:")
+    print("   1. 1_executive_summary.png      - KPI dashboard with baseline & top features")
+    print("   2. 2_beeswarm.png               - Feature value distribution vs SHAP impact")
+    print("   3. 3_dependence_plots.png       - Top 3 features interaction analysis")
+    print("   4. 4_waterfall_peak.png         - Peak pollution event breakdown")
+    print("   5. 5_waterfall_clean.png        - Clean day analysis")
+    print("   6. 5_waterfall_polluted.png     - Polluted day analysis")
+    print("   7. 7_all_features_ranked.png    - Complete feature importance ranking")
+    print("\n🎨 All plots saved at 300 DPI for publication quality!")
+    print("="*80)
 
 if __name__ == "__main__":
     perform_enhanced_shap_analysis()

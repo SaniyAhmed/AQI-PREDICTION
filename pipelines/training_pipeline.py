@@ -93,21 +93,22 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT
+    # 2. TOURNAMENT - FIXED: Less aggressive regularization to prevent overfitting
     print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
             "n_estimators": [500], 
-            "max_depth": [6, 8],
-            "min_samples_leaf": [10],
+            "max_depth": [10, 12],  # Increased from [6,8] for more flexibility
+            "min_samples_leaf": [4],  # Reduced from [10] to capture finer patterns
             "max_features": ["sqrt"]
         }),
-        'XGBoost': (XGBRegressor(random_state=42), {
+        'XGBoost': (XGBRegressor(random_state=42, reg_alpha=0.1, reg_lambda=1), {
             "n_estimators": [300], 
-            "max_depth": [3], 
-            "learning_rate": [0.05]
+            "max_depth": [5],  # Increased from [3] for better pattern capture
+            "learning_rate": [0.08],  # Slightly increased from [0.05]
+            "subsample": [0.8]  # Added for diversity
         }),
-        'SVR': (SVR(), {"C": [1], "epsilon": [0.1]})
+        'SVR': (SVR(), {"C": [10], "epsilon": [0.2]})  # Increased C for flexibility
     }
 
     results, best_estimators = [], []
@@ -169,7 +170,7 @@ def run_pipeline():
     )
     aqi_model.save(model_dir)
 
-    # 6. FORECAST GENERATION
+    # 6. FORECAST GENERATION - FIXED: Reduced smoothing for more variation
     print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     if X_f_base.empty: return
@@ -179,8 +180,14 @@ def run_pipeline():
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
         if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
-        suggestion = ensemble_model.predict(scaler.transform(row))[0]
-        next_step = (moving_state_aqi * 0.5) + (suggestion * 0.5)
+        
+        # Get raw model prediction
+        raw_prediction = ensemble_model.predict(scaler.transform(row))[0]
+        
+        # FIXED: Reduced smoothing from 0.5/0.5 to 0.3/0.7 for more responsiveness
+        # This allows predictions to vary more based on actual weather/pollutant changes
+        next_step = (moving_state_aqi * 0.3) + (raw_prediction * 0.7)
+        
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 

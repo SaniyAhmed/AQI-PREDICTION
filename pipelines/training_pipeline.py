@@ -102,10 +102,14 @@ def run_pipeline():
             "min_samples_leaf": [10],
             "max_features": ["sqrt"]
         }),
-        'XGBoost': (XGBRegressor(random_state=42), {
-            "n_estimators": [300], 
-            "max_depth": [3], 
-            "learning_rate": [0.05]
+        'XGBoost': (XGBRegressor(random_state=42, 
+                                 reg_alpha=0.01,      # Light L1 regularization
+                                 reg_lambda=0.3,      # Light L2 regularization (reduced from 0.5)
+                                 subsample=0.85,      # Use 85% of data per tree (increased)
+                                 colsample_bytree=0.85), {  # Use 85% of features (increased)
+            "n_estimators": [250],   # Reduced from 300 to prevent overfitting
+            "max_depth": [6],        # Increased from 5 for more flexibility
+            "learning_rate": [0.1]   # Increased from 0.08 for faster adaptation
         }),
         'SVR': (SVR(), {"C": [1], "epsilon": [0.1]})
     }
@@ -169,7 +173,7 @@ def run_pipeline():
     )
     aqi_model.save(model_dir)
 
-    # 6. FORECAST GENERATION
+    # 6. FORECAST GENERATION - CHANGED: 20% previous, 80% model prediction (MAXIMUM VARIATION)
     print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     if X_f_base.empty: return
@@ -180,7 +184,7 @@ def run_pipeline():
         row = X_f_base.iloc[[i]].copy()
         if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
         suggestion = ensemble_model.predict(scaler.transform(row))[0]
-        next_step = (moving_state_aqi * 0.5) + (suggestion * 0.5)
+        next_step = (moving_state_aqi * 0.2) + (suggestion * 0.8)  # CHANGED: 20/80 ratio for MORE variation
         predictions.append(float(next_step))
         moving_state_aqi = next_step 
 

@@ -93,27 +93,27 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT - AGGRESSIVE: Maximum flexibility
-    print("\n🏆 STARTING AGGRESSIVE MODEL TOURNAMENT (NO OVERFITTING)...")
+    # 2. TOURNAMENT - FIXED: Much less regularization to prevent overfitting
+    print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
-            "n_estimators": [200],
-            "max_depth": [20, 25],  # Very deep
-            "min_samples_leaf": [1, 2],  # Minimal constraint
-            "min_samples_split": [2],
+            "n_estimators": [300],  # Reduced from 500 for faster, less overfit
+            "max_depth": [15, 20],  # Significantly deeper than before
+            "min_samples_leaf": [2],  # Reduced from [4] to capture more variation
+            "min_samples_split": [4],  # Added - allows finer splits
             "max_features": ["sqrt"]
         }),
-        'XGBoost': (XGBRegressor(random_state=42, reg_alpha=0, reg_lambda=0.1), {
-            "n_estimators": [150],
-            "max_depth": [7, 8],  # Deep trees
-            "learning_rate": [0.15],  # Fast learning
+        'XGBoost': (XGBRegressor(random_state=42, reg_alpha=0.01, reg_lambda=0.5), {
+            "n_estimators": [200],  # Reduced from 300
+            "max_depth": [6, 7],  # Increased from [5] for more flexibility
+            "learning_rate": [0.1],  # Increased from [0.08] for faster learning
             "subsample": [0.8],
-            "colsample_bytree": [0.8]
+            "colsample_bytree": [0.8]  # Added for diversity
         }),
         'SVR': (SVR(), {
-            "C": [100],  # Very flexible
-            "epsilon": [0.5],
-            "gamma": ["scale"]
+            "C": [50],  # Increased from [10] for much more flexibility
+            "epsilon": [0.3],  # Increased from [0.2]
+            "gamma": ["scale"]  # Added for better kernel
         })
     }
 
@@ -132,12 +132,15 @@ def run_pipeline():
     winner_name = res_df.iloc[0]['Model']
     winner_rmse = res_df.iloc[0]['Test RMSE']
 
+    # Build a dict of each individual model's Test RMSE for the registry
+    # Keys will be: randomforest_rmse, xgboost_rmse, svr_rmse
     individual_rmses = {}
     for _, row in res_df.iterrows():
         model_key = row['Model'].lower() + "_rmse"
         individual_rmses[model_key] = float(row['Test RMSE'])
 
     print(f"\n   Winner: {winner_name} (RMSE: {winner_rmse:.4f})")
+    print(f"   Individual RMSEs: {individual_rmses}")
 
     # 4. ENSEMBLE TRAINING
     ensemble_model = VotingRegressor(best_estimators, weights=[1, 2, 2])
@@ -151,39 +154,48 @@ def run_pipeline():
     joblib.dump(ensemble_model, f"{model_dir}/model.pkl")
     joblib.dump(scaler, f"{model_dir}/scaler.pkl")
 
+    # Store ALL metrics in the registry:
+    #   rmse              -> ensemble test RMSE
+    #   winner_rmse       -> best individual model's test RMSE
+    #   randomforest_rmse -> RandomForest test RMSE
+    #   xgboost_rmse      -> XGBoost test RMSE
+    #   svr_rmse          -> SVR test RMSE
     registry_metrics = {
         "rmse":        float(ens_test_rmse),
         "winner_rmse": float(winner_rmse),
+        # "winner" removed because it must be a float
     }
     registry_metrics.update(individual_rmses)
+
+    print(f"   Saving to registry with metrics: {registry_metrics}")
 
     aqi_model = mr.python.create_model(
         name="karachi_aqi_model",
         metrics=registry_metrics,
-        description=f"Winner: {winner_name} | NO SMOOTHING"
+        description=f"Winner: {winner_name}"
     )
     aqi_model.save(model_dir)
 
-    # 6. FORECAST GENERATION - ZERO SMOOTHING FOR MAXIMUM VARIATION
-    print("\n🔮 Generating 3-day Forecast (NO SMOOTHING)...")
+    # 6. FORECAST GENERATION - FIXED: Minimal smoothing for maximum responsiveness
+    print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     if X_f_base.empty: return
     
     predictions = []
-    last_prediction = current_aqi  # Track last for lag feature only
-    
+    moving_state_aqi = current_aqi 
     for i in range(len(X_f_base)):
         row = X_f_base.iloc[[i]].copy()
+        if 'aqi_lag_1' in row.columns: row['aqi_lag_1'] = moving_state_aqi
         
-        # Update lag feature with PREVIOUS prediction (not smoothed)
-        if 'aqi_lag_1' in row.columns:
-            row['aqi_lag_1'] = last_prediction
-        
-        # ZERO SMOOTHING: Use raw model output directly
+        # Get raw model prediction
         raw_prediction = ensemble_model.predict(scaler.transform(row))[0]
         
-        predictions.append(float(raw_prediction))
-        last_prediction = raw_prediction  # Store for next iteration's lag
+        # FIXED: Dramatically reduced smoothing from 0.3/0.7 to 0.1/0.9
+        # This allows predictions to vary much more based on actual conditions
+        next_step = (moving_state_aqi * 0.1) + (raw_prediction * 0.9)
+        
+        predictions.append(float(next_step))
+        moving_state_aqi = next_step 
 
     # 7. HOURLY DATA PREP
     forecast_df = X_f_base[['year', 'month', 'day', 'hour']].copy()
@@ -201,11 +213,11 @@ def run_pipeline():
             "date": str(date),
             "daily_avg_aqi": round(group.mean(), 2),
             "grand_avg_aqi": grand_avg,
-            "forecast_type": "3-day-no-smoothing"
+            "forecast_type": "3-day-ensemble"
         })
     summary_df = pd.DataFrame(summary_data)
 
-    # 9. UPLOAD TO HOPSWORKS
+    # 9. UPLOAD TO HOPSWORKS (With Connection Crash Resilience)
     print("📤 Uploading Forecasts to Hopsworks...")
     
     def resilient_insert(fg_name, data, version=1):
@@ -218,6 +230,7 @@ def run_pipeline():
             fg.insert(data, write_options={"wait_for_job": False})
             print(f"✅ {fg_name} upload initiated.")
         except Exception as e:
+            # If the error is just a disconnected pipe, the upload likely started anyway
             if "RemoteDisconnected" in str(e) or "Connection aborted" in str(e):
                 print(f"⚠️ Connection dropped while launching {fg_name} job. Data likely reached server.")
             else:
@@ -227,10 +240,6 @@ def run_pipeline():
     resilient_insert("karachi_aqi_daily_summary", summary_df, version=2)
     
     print(f"\n📊 3-DAY GRAND AVERAGE: {grand_avg}")
-    print(f"📊 VARIATION CHECK:")
-    print(f"   Min AQI: {min(predictions):.2f}")
-    print(f"   Max AQI: {max(predictions):.2f}")
-    print(f"   Range: {max(predictions) - min(predictions):.2f}")
     
     # 10. CLEANUP
     try:

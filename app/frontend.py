@@ -83,7 +83,6 @@ def safe_float(val):
         return None
 
 
-
 def get_winner_from_rmse(model_info: dict):
     """
     Compare the three individual model RMSEs stored in model_info and return
@@ -137,21 +136,14 @@ def aqi_category(val):
 
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300)
+# FIXED: Reduced TTL from 300 to 60 seconds for faster updates
+@st.cache_data(ttl=60)
 def load_all_data():
     daily_summary_df = None
     current_aqi      = None
     model_info       = {}
 
-    local_file = "data/forecast_data.csv"
-    if os.path.exists(local_file):
-        try:
-            daily_summary_df = pd.read_csv(local_file)
-            daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
-            daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
-        except Exception as e:
-            st.error(f"Error reading local CSV: {e}")
-
+    # FIXED: Removed local CSV fallback - always fetch fresh from Hopsworks
     try:
         api_key = st.secrets.get("MY_HOPSWORK_KEY") or os.getenv("MY_HOPSWORK_KEY")
         if api_key:
@@ -159,55 +151,54 @@ def load_all_data():
             fs = project.get_feature_store()
             mr = project.get_model_registry()
 
-            if daily_summary_df is None or daily_summary_df.empty:
-                try:
-                    fg_summary = fs.get_feature_group(name="karachi_aqi_daily_summary", version=2)
-                    daily_summary_df = fg_summary.read()
-                    daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
-                    daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
-                except Exception as e:
-                    st.warning(f"Could not fetch daily summary: {e}")
-
+            # Fetch daily summary
             try:
-                # FIXED: Now reading from version 5 instead of version 4
+                fg_summary = fs.get_feature_group(name="karachi_aqi_daily_summary", version=2)
+                daily_summary_df = fg_summary.read()
+                daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
+                daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
+                print(f"✅ Loaded {len(daily_summary_df)} forecast records")
+            except Exception as e:
+                st.warning(f"Could not fetch daily summary: {e}")
+
+            # Fetch current AQI from historical data
+            try:
                 fg_historical = fs.get_feature_group(name="karachi_aqi", version=5)
                 historical_df = fg_historical.read().sort_values(['year', 'month', 'day', 'hour'])
                 if not historical_df.empty:
                     current_aqi = float(historical_df.iloc[-1]['aqi'])
-            except Exception:
-                pass
+                    print(f"✅ Current AQI: {current_aqi}")
+            except Exception as e:
+                print(f"⚠️ Could not fetch current AQI: {e}")
 
-
+            # FIXED: Fetch model registry with better version handling
             try:
-                # Fetch ALL models and sort by version (highest first) to get the LATEST
                 models = mr.get_models("karachi_aqi_model")
                 if models:
-                    # Sort version descending (handle potential string versions safely)
+                    # Sort by version (highest first) to get the LATEST model
                     models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
-                    
                     latest = models_sorted[0]
-                    # Try to find the first model that actually has the new metrics
-                    for model in models_sorted:
-                        # Check for one of the new keys from the latest pipeline
-                        if "winner_rmse" in model.training_metrics or "randomforest_rmse" in model.training_metrics:
-                            latest = model
-                            break
                     
+                    print(f"📊 Loading model version {latest.version}")
                     m = latest.training_metrics
+                    
+                    # FIXED: Handle new metric keys from improved pipeline
                     model_info = {
                         "name":           latest.name,
                         "version":        latest.version,
-                        "ensemble_rmse":  m.get("test_rmse") or m.get("rmse", "N/A"),
+                        "ensemble_rmse":  m.get("rmse", "N/A"),  # This is the ensemble RMSE
                         "winner_rmse":    m.get("winner_rmse", "N/A"),
                         "winner":         m.get("winner", "N/A"),
-                        # keys from user screenshot: randomforest_rmse, xgboost_rmse, svr_rmse
-                        "rf_rmse":        m.get("randomforest_rmse",   "N/A"),
-                        "xgb_rmse":       m.get("xgboost_rmse",        "N/A"),
-                        "svr_rmse":       m.get("svr_rmse",            "N/A"),
+                        "rf_rmse":        m.get("randomforest_rmse", "N/A"),
+                        "xgb_rmse":       m.get("xgboost_rmse", "N/A"),
+                        "svr_rmse":       m.get("svr_rmse", "N/A"),
                         "description":    latest.description,
                     }
-            except Exception:
-                pass
+                    
+                    print(f"📊 Model metrics: {model_info}")
+                    
+            except Exception as e:
+                print(f"⚠️ Could not fetch model info: {e}")
 
             hopsworks.logout()
     except Exception as e:
@@ -540,10 +531,10 @@ else:
     st.error("⚠️ Forecast data not available.")
     st.info("""
     **Troubleshooting:**
-    - Check if `data/forecast_data.csv` exists in your repository
     - Verify GitHub Actions workflow has run successfully
     - Check Hopsworks connection
     - Review logs for errors
+    - Try clearing Streamlit cache (press 'C' in the app)
     """)
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -567,9 +558,18 @@ if daily_summary_df is not None:
             f"to {daily_summary_df['date'].max().strftime('%Y-%m-%d')}"
         )
         st.sidebar.write(f"**Grand Avg AQI:** {round(grand_avg, 1)}")
+        # FIXED: Add model version info
+        if model_info:
+            st.sidebar.write(f"**Model Version:** {model_info.get('version', 'N/A')}")
     except NameError:
         pass
 
 st.sidebar.write("---")
+
+# FIXED: Add cache clear button
+if st.sidebar.button("🔄 Clear Cache & Reload"):
+    st.cache_data.clear()
+    st.rerun()
+
 st.sidebar.caption("🔄 Data synced via GitHub Actions")
 st.sidebar.caption(f"📅 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")

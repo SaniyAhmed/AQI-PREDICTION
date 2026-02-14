@@ -10,6 +10,7 @@ print("🔐 Logging into Hopsworks...")
 try:
     project = hopsworks.login(api_key_value=os.getenv('MY_HOPSWORK_KEY'))
     fs = project.get_feature_store()
+    mr = project.get_model_registry()
 except Exception as e:
     print(f"❌ Login failed: {e}")
     sys.exit(1)
@@ -19,7 +20,6 @@ FG_NAME = "karachi_aqi_daily_summary"
 FG_VERSION = 2
 
 print(f"📥 Fetching {FG_NAME} v{FG_VERSION}...")
-
 try:
     # Get the daily summary feature group
     fg = fs.get_feature_group(name=FG_NAME, version=FG_VERSION)
@@ -51,11 +51,26 @@ try:
     # Display the data
     print("\n📋 Forecast Data:")
     print(df.to_string(index=False))
-
+    
+    # FIXED: Also fetch and display model info for verification
+    print("\n\n🤖 Fetching Latest Model Info...")
+    try:
+        models = mr.get_models("karachi_aqi_model")
+        if models:
+            models_sorted = sorted(models, key=lambda x: int(x.version), reverse=True)
+            latest = models_sorted[0]
+            
+            print(f"\n📊 Latest Model (Version {latest.version}):")
+            print(f"   Description: {latest.description}")
+            print(f"   Metrics:")
+            for key, val in latest.training_metrics.items():
+                print(f"      {key}: {val}")
+    except Exception as e:
+        print(f"⚠️ Could not fetch model info: {e}")
+        
 except Exception as e:
     print(f"❌ Failed to fetch data: {e}")
     sys.exit(1)
-
 finally:
     try:
         hopsworks.logout()

@@ -93,22 +93,28 @@ def run_pipeline():
     X_train_s = scaler.fit_transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # 2. TOURNAMENT - FIXED: Less aggressive regularization to prevent overfitting
+    # 2. TOURNAMENT - FIXED: Much less regularization to prevent overfitting
     print("\n🏆 STARTING REGULARIZED MODEL TOURNAMENT...")
     model_configs = {
         'RandomForest': (RandomForestRegressor(random_state=42), {
-            "n_estimators": [500], 
-            "max_depth": [10, 12],  # Increased from [6,8] for more flexibility
-            "min_samples_leaf": [4],  # Reduced from [10] to capture finer patterns
+            "n_estimators": [300],  # Reduced from 500 for faster, less overfit
+            "max_depth": [15, 20],  # Significantly deeper than before
+            "min_samples_leaf": [2],  # Reduced from [4] to capture more variation
+            "min_samples_split": [4],  # Added - allows finer splits
             "max_features": ["sqrt"]
         }),
-        'XGBoost': (XGBRegressor(random_state=42, reg_alpha=0.1, reg_lambda=1), {
-            "n_estimators": [300], 
-            "max_depth": [5],  # Increased from [3] for better pattern capture
-            "learning_rate": [0.08],  # Slightly increased from [0.05]
-            "subsample": [0.8]  # Added for diversity
+        'XGBoost': (XGBRegressor(random_state=42, reg_alpha=0.01, reg_lambda=0.5), {
+            "n_estimators": [200],  # Reduced from 300
+            "max_depth": [6, 7],  # Increased from [5] for more flexibility
+            "learning_rate": [0.1],  # Increased from [0.08] for faster learning
+            "subsample": [0.8],
+            "colsample_bytree": [0.8]  # Added for diversity
         }),
-        'SVR': (SVR(), {"C": [10], "epsilon": [0.2]})  # Increased C for flexibility
+        'SVR': (SVR(), {
+            "C": [50],  # Increased from [10] for much more flexibility
+            "epsilon": [0.3],  # Increased from [0.2]
+            "gamma": ["scale"]  # Added for better kernel
+        })
     }
 
     results, best_estimators = [], []
@@ -170,7 +176,7 @@ def run_pipeline():
     )
     aqi_model.save(model_dir)
 
-    # 6. FORECAST GENERATION - FIXED: Reduced smoothing for more variation
+    # 6. FORECAST GENERATION - FIXED: Minimal smoothing for maximum responsiveness
     print("\n🔮 Generating 3-day Forecast...")
     X_f_base, times = get_forecast_features(feature_names, latest_actuals)
     if X_f_base.empty: return
@@ -184,9 +190,9 @@ def run_pipeline():
         # Get raw model prediction
         raw_prediction = ensemble_model.predict(scaler.transform(row))[0]
         
-        # FIXED: Reduced smoothing from 0.5/0.5 to 0.3/0.7 for more responsiveness
-        # This allows predictions to vary more based on actual weather/pollutant changes
-        next_step = (moving_state_aqi * 0.3) + (raw_prediction * 0.7)
+        # FIXED: Dramatically reduced smoothing from 0.3/0.7 to 0.1/0.9
+        # This allows predictions to vary much more based on actual conditions
+        next_step = (moving_state_aqi * 0.1) + (raw_prediction * 0.9)
         
         predictions.append(float(next_step))
         moving_state_aqi = next_step 

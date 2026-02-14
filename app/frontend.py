@@ -143,7 +143,17 @@ def load_all_data():
     current_aqi      = None
     model_info       = {}
 
-    # FIXED: Removed local CSV fallback - always fetch fresh from Hopsworks
+    # Try loading from local CSV first (GitHub Actions workflow saves this)
+    local_file = "data/forecast_data.csv"
+    if os.path.exists(local_file):
+        try:
+            daily_summary_df = pd.read_csv(local_file)
+            daily_summary_df['date'] = pd.to_datetime(daily_summary_df['date'])
+            daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
+            print(f"✅ Loaded {len(daily_summary_df)} records from local CSV")
+        except Exception as e:
+            st.error(f"Error reading local CSV: {e}")
+
     try:
         api_key = st.secrets.get("MY_HOPSWORK_KEY") or os.getenv("MY_HOPSWORK_KEY")
         if api_key:

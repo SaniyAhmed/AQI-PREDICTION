@@ -158,7 +158,7 @@ def load_all_data(_cache_buster):
             daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
             print(f"✅ Loaded {len(daily_summary_df)} records from local CSV")
         except Exception as e:
-            st.error(f"Error reading local CSV: {e}")
+            print(f"⚠️ Error reading local CSV: {e}")
 
     try:
         api_key = st.secrets.get("MY_HOPSWORK_KEY") or os.getenv("MY_HOPSWORK_KEY")
@@ -175,7 +175,7 @@ def load_all_data(_cache_buster):
                 daily_summary_df = daily_summary_df.sort_values('date', ascending=True)
                 print(f"✅ Loaded {len(daily_summary_df)} forecast records")
             except Exception as e:
-                st.warning(f"Could not fetch daily summary: {e}")
+                print(f"⚠️ Could not fetch daily summary: {e}")
 
             # Fetch current AQI from historical data
             try:
@@ -218,7 +218,7 @@ def load_all_data(_cache_buster):
 
             hopsworks.logout()
     except Exception as e:
-        st.sidebar.warning(f"Hopsworks connection not available: {e}")
+        print(f"⚠️ Hopsworks connection not available: {e}")
 
     return daily_summary_df, current_aqi, model_info
 

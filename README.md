@@ -29,7 +29,7 @@ The project follows a modular MLOps lifecycle managed via **GitHub Actions** and
 | **Feature Store**  | Hopsworks                                |
 | **ML Models**      | Scikit-learn, XGBoost, SVR, RandomForest |
 | **Orchestration**  | GitHub Actions (CI/CD)                   |
-| **Dashboard**      | Streamlit & Flask                        |
+| **Dashboard**      | Streamlit                                |
 | **Explainability** | SHAP                                     |
 
 ---

@@ -29,16 +29,6 @@ graph LR
     C --> D[🤖 ML Training]
     D --> E[📊 Live Dashboard]
     E --> F[👥 End Users]
-```
-
-| Feature | Description |
-|---------|-------------|
-| **🔄 Automated Pipelines** | Hourly feature ingestion & daily model retraining via GitHub Actions |
-| **🏆 Champion-Challenger** | Continuous evaluation of XGBoost, Random Forest & SVR models |
-| **🎯 Zero Skew Architecture** | Hopsworks Feature Store eliminates training-serving inconsistencies |
-| **🔍 Explainable AI** | SHAP analysis reveals PM₂.₅ and wind speed as primary AQI drivers |
-| **📈 Real-time Forecasting** | 72-hour rolling predictions with confidence intervals |
-
 ---
 
 ## 🏗️ System Architecture
@@ -85,7 +75,7 @@ graph LR
 #### 2️⃣ **Training Pipeline** (Daily Execution)
 - 🔬 Implements Time-Series Nested Cross-Validation
 - 🥊 Champion-Challenger evaluation across 3 algorithms
-- 📊 Tracks metrics: RMSE, MAE, R² via Hopsworks Model Registry
+- 📊 Tracks metrics: RMSE via Hopsworks Model Registry
 
 #### 3️⃣ **Inference Pipeline** (On-Demand)
 - 🎯 Generates 72-hour forecasts using Voting Ensemble
@@ -122,7 +112,7 @@ graph LR
 | 📊 **Dashboard** | Streamlit |
 | 🔍 **Explainability** | SHAP |
 | 📈 **Monitoring** | Hopsworks Registry |
-| 🌐 **Data Source** | Open-Meteo API |
+| 🌐 **Data Source** | Open-Meteo API and OpenWeather API |
 | ☁️ **Architecture** | Serverless |
 
 </td>
@@ -158,12 +148,6 @@ Top Feature Importance (SHAP Values):
 4. Relative Humidity      ████████              35%
 5. Atmospheric Pressure   █████                 28%
 ```
-
-#### 🛡️ **Robustness Mechanisms**
-- ✅ Time-Series Nested Cross-Validation prevents data leakage
-- ✅ Feature Store eliminates training-serving skew
-- ✅ Ensemble voting reduces variance across predictions
-
 ---
 
 ## 📈 Dashboard Features
@@ -178,28 +162,8 @@ Top Feature Importance (SHAP Values):
 |---------|-------------|
 | 🎯 **Current AQI** | Real-time air quality status with health advisory |
 | 📅 **3-Day Forecast** | Hourly predictions with confidence intervals |
-| 📊 **Trend Analysis** | Historical patterns and seasonal variations |
 | 🗺️ **Monitoring Station** | Geospatial context for Karachi Central |
 | 🤖 **Model Performance** | Live RMSE tracking and champion selection |
-| 🔍 **SHAP Explainability** | Feature importance for each prediction |
-
----
-
-## 🎓 Scientific Contributions
-
-### 💡 **Novel Methodologies**
-
-1. **Zero-Skew Architecture**
-   - Eliminates train-test distribution mismatch via Feature Store
-   - Ensures production predictions use identical transformations
-
-2. **Atmospheric Momentum Feature**
-   - First-order derivative of AQI captures pollution dynamics
-   - Improves spike detection by 23% over baseline models
-
-3. **Serverless Champion-Challenger**
-   - Fully automated model selection without human intervention
-   - Reduces model staleness risk through daily retraining
 
 ---
 
@@ -233,9 +197,9 @@ Top Feature Importance (SHAP Values):
 **Saniya Ahmed**  
 *Data Science Intern @ 10Pearls*
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/saniya-ahmed)
-[![GitHub](https://img.shields.io/badge/GitHub-Follow-black?style=for-the-badge&logo=github)](https://github.com/saniya-ahmed)
-[![Email](https://img.shields.io/badge/Email-Contact-red?style=for-the-badge&logo=gmail)](mailto:saniya@example.com)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=for-the-badge&logo=linkedin)](https://www.linkedin.com/in/saniyaahmedbscs/)
+[![GitHub](https://img.shields.io/badge/GitHub-Follow-black?style=for-the-badge&logo=github)](https://github.com/SaniyAhmed)
+[![Email](https://img.shields.io/badge/Email-Contact-red?style=for-the-badge&logo=gmail)](mailto:saniyax06@gmail.com)
 
 </div>
 
@@ -245,6 +209,6 @@ Top Feature Importance (SHAP Values):
 
 ### ⭐ If you find this project useful, please consider giving it a star!
 
-**© 2024 Karachi AQI Sentinel. Built with ❤️ for cleaner air.**
+**© 2026 Karachi AQI Sentinel. Built with ❤️ for cleaner air.**
 
 </div>

@@ -3,15 +3,9 @@
 # 🌬️ Karachi AQI Sentinel
 ### *Serverless MLOps Pipeline for Air Quality Forecasting*
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://karachi-aqi-sentinel.streamlit.app/)
-[![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
-[![Hopsworks](https://img.shields.io/badge/Feature_Store-Hopsworks-00C9A7.svg)](https://www.hopsworks.ai/)
-[![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF.svg)](https://github.com/features/actions)
-
 *A production-ready, end-to-end MLOps system delivering **72-hour AQI forecasts** for Karachi, Pakistan with real-time health insights and meteorological transparency.*
 
-[Live Dashboard](https://karachi-aqi-sentinel.streamlit.app/) • [Features](#-key-features) • [Architecture](#-system-architecture) • [Tech Stack](#-tech-stack)
-
+                                            [Live Dashboard](https://karachi-aqi-sentinel.streamlit.app/) 
 ---
 
 </div>

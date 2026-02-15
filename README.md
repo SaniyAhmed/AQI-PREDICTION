@@ -5,7 +5,8 @@
 
 *A production-ready, end-to-end MLOps system delivering **72-hour AQI forecasts** for Karachi, Pakistan with real-time health insights and meteorological transparency.*
 
-                                            [Live Dashboard](https://karachi-aqi-sentinel.streamlit.app/) 
+[Live Dashboard](https://karachi-aqi-sentinel.streamlit.app/) 
+
 ---
 
 </div>
@@ -23,6 +24,8 @@ graph LR
     C --> D[🤖 ML Training]
     D --> E[📊 Live Dashboard]
     E --> F[👥 End Users]
+```
+
 ---
 
 ## 🏗️ System Architecture
@@ -142,6 +145,7 @@ Top Feature Importance (SHAP Values):
 4. Relative Humidity      ████████              35%
 5. Atmospheric Pressure   █████                 28%
 ```
+
 ---
 
 ## 📈 Dashboard Features

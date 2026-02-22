@@ -13,5 +13,6 @@ date,daily_avg_aqi,grand_avg_aqi,forecast_type
 2026-02-19,104.98,105.11,3-day-ensemble
 2026-02-20,116.26,116.94,3-day-ensemble
 2026-02-21,106.68,106.85,3-day-ensemble
-2026-02-22,106.9,106.85,3-day-ensemble
-2026-02-23,106.98,106.85,3-day-ensemble
+2026-02-22,100.97,101.08,3-day-ensemble
+2026-02-23,101.19,101.08,3-day-ensemble
+2026-02-24,101.1,101.08,3-day-ensemble
